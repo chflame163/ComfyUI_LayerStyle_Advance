@@ -8,7 +8,7 @@
 import math
 import torch
 import torch.nn as nn
-from timm.models.layers import trunc_normal_ as __call_trunc_normal_
+from timm.layers import trunc_normal_ as __call_trunc_normal_
 
 from torchscale.model.BEiT3 import BEiT3
 from torchscale.architecture.config import EncoderConfig
