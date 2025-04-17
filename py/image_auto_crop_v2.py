@@ -113,8 +113,16 @@ class ImageAutoCropV2:
                         previous_dino_model = grounding_dino_model
                     item = _image.convert('RGBA')
                     boxes = groundingdino_predict(DINO_MODEL, item, sam_prompt, sam_threshold)
-                    (_, _mask) = sam_segment(SAM_MODEL, item, boxes)
-                    _mask = mask2image(_mask[0])
+                    sam_result = sam_segment(SAM_MODEL, item, boxes)
+                    if sam_result is not None:
+                        (_, _mask) = sam_result
+                        _mask = mask2image(_mask[0])
+                    else:
+                        # don't do any cropping
+                        _mask = Image.new('RGBA', _image.size, color="#FFFFFF")
+                        ret_images.append(pil2tensor(_image))
+                        ret_box_previews.append(pil2tensor(_mask))
+                        ret_masks.append(image2mask(_mask))
                 else:
                     _mask = RMBG(_image)
                 if ultra_detail_range:
