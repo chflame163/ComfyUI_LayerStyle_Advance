@@ -123,6 +123,7 @@ class ImageAutoCropV2:
                         ret_images.append(pil2tensor(_image))
                         ret_box_previews.append(pil2tensor(_mask))
                         ret_masks.append(image2mask(_mask))
+                        continue
                 else:
                     _mask = RMBG(_image)
                 if ultra_detail_range:
