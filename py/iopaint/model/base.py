@@ -75,7 +75,12 @@ class InpaintModel:
         result, image, mask = self.forward_post_process(result, image, mask, config)
 
         if config.sd_keep_unmasked_area:
-            mask = mask[:, :, np.newaxis]
+            # 确保mask是(H, W, 1)形状
+            if mask.ndim == 4:
+                mask = mask.squeeze()  # 移除所有长度为1的维度，变为(H, W)
+            if mask.ndim == 2:
+                mask = mask[..., np.newaxis]  # 添加通道维度，变为(H, W, 1)
+            
             result = result * (mask / 255) + image[:, :, ::-1] * (1 - (mask / 255))
         return result
 
