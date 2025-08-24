@@ -59,12 +59,14 @@ class SegmentAnythingUltraV2:
             local_files_only = False
 
         if self.previous_sam_model != sam_model or self.SAM_MODEL is None:
-            self.SAM_MODEL = load_sam_model(sam_model)
+            self.SAM_MODEL = load_sam_model(sam_model, device)
             self.previous_sam_model = sam_model
         if self.previous_dino_model != grounding_dino_model or self.DINO_MODEL is None:
-            self.DINO_MODEL = load_groundingdino_model(grounding_dino_model)
+            self.DINO_MODEL = load_groundingdino_model(grounding_dino_model, device)
             self.previous_dino_model = grounding_dino_model
 
+        self.SAM_MODEL.to(device)
+        self.DINO_MODEL.to(device)
         # SAM_MODEL = load_sam_model(sam_model)
         # DINO_MODEL = load_groundingdino_model(grounding_dino_model)
         ret_images = []
@@ -74,10 +76,10 @@ class SegmentAnythingUltraV2:
             i = torch.unsqueeze(i, 0)
             i = pil2tensor(tensor2pil(i).convert('RGB'))
             _image = tensor2pil(i).convert('RGBA')
-            boxes = groundingdino_predict(self.DINO_MODEL, _image, prompt, threshold)
+            boxes = groundingdino_predict(self.DINO_MODEL, _image, prompt, threshold, device)
             if boxes.shape[0] == 0:
                 break
-            (_, _mask) = sam_segment(self.SAM_MODEL, _image, boxes)
+            (_, _mask) = sam_segment(self.SAM_MODEL, _image, boxes, device)
             _mask = _mask[0]
             detail_range = detail_erode + detail_dilate
             if process_detail:
@@ -116,5 +118,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LayerMask: SegmentAnythingUltra V2": "LayerMask: SegmentAnythingUltra V2(Advance)",
+    "LayerMask: SegmentAnythingUltra V2": "LayerMask: SegmentAnythingUltra V2",
 }

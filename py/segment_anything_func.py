@@ -70,7 +70,7 @@ def get_bert_base_uncased_model_path():
 def list_sam_model():
     return list(sam_model_list.keys())
 
-def load_sam_model(model_name):
+def load_sam_model(model_name, device=None):
     sam_checkpoint_path = get_local_filepath(
         sam_model_list[model_name]["model_url"], sam_model_dir_name)
     model_file_name = os.path.basename(sam_checkpoint_path)
@@ -78,9 +78,13 @@ def load_sam_model(model_name):
     if 'hq' not in model_type and 'mobile' not in model_type:
         model_type = '_'.join(model_type.split('_')[:-1])
     sam = sam_model_registry[model_type](checkpoint=sam_checkpoint_path)
-    sam_device = comfy.model_management.get_torch_device()
-    sam.to(device=sam_device)
-    sam.eval()
+
+    if device:
+        sam.to(device=device)
+    else:
+        sam.to(device=comfy.model_management.get_torch_device())
+
+    # sam.eval()
     sam.model_name = model_file_name
     return sam
 
@@ -104,7 +108,7 @@ def get_local_filepath(url, dirname, local_file_name=None):
         download_url_to_file(url, destination)
     return destination
 
-def load_groundingdino_model(model_name):
+def load_groundingdino_model(model_name, device=None):
     from local_groundingdino.util.utils import clean_state_dict as local_groundingdino_clean_state_dict
     from local_groundingdino.util.slconfig import SLConfig as local_groundingdino_SLConfig
     from local_groundingdino.models import build_model as local_groundingdino_build_model
@@ -127,9 +131,13 @@ def load_groundingdino_model(model_name):
     )
     dino.load_state_dict(local_groundingdino_clean_state_dict(
         checkpoint['model']), strict=False)
-    device = comfy.model_management.get_torch_device()
-    dino.to(device=device)
-    dino.eval()
+
+    if device:
+        dino.to(device=device)
+    else:
+        dino.to(device=comfy.model_management.get_torch_device())
+
+    # dino.eval()
     return dino
 
 def list_groundingdino_model():
@@ -139,7 +147,8 @@ def groundingdino_predict(
     dino_model,
     image,
     prompt,
-    threshold
+    threshold,
+    device = None
 ):
     from local_groundingdino.datasets import transforms as T
     def load_dino_image(image_pil):
@@ -158,8 +167,12 @@ def groundingdino_predict(
         caption = caption.strip()
         if not caption.endswith("."):
             caption = caption + "."
-        device = comfy.model_management.get_torch_device()
-        image = image.to(device)
+
+        if device:
+            image = image.to(device=device)
+        else:
+            image = image.to(device=comfy.model_management.get_torch_device())
+
         with torch.no_grad():
             outputs = model(image[None], captions=[caption])
         logits = outputs["pred_logits"].sigmoid()[0]  # (nq, 256)
@@ -209,7 +222,8 @@ def split_image_mask(image):
 def sam_segment(
     sam_model,
     image,
-    boxes
+    boxes,
+    device=None
 ):
     if boxes.shape[0] == 0:
         return None
@@ -222,12 +236,18 @@ def sam_segment(
     image_np_rgb = image_np[..., :3]
     predictor.set_image(image_np_rgb)
     transformed_boxes = predictor.transform.apply_boxes_torch(
-        boxes, image_np.shape[:2])
-    sam_device = comfy.model_management.get_torch_device()
+        boxes, image_np.shape[:2]
+    )
+
+    if device:
+        transformed_boxes.to(device=device)
+    else:
+        transformed_boxes.to(device=comfy.model_management.get_torch_device())
+
     masks, _, _ = predictor.predict_torch(
         point_coords=None,
         point_labels=None,
-        boxes=transformed_boxes.to(sam_device),
+        boxes=transformed_boxes,
         multimask_output=False)
     masks = masks.permute(1, 0, 2, 3).cpu().numpy()
     return create_tensor_output(image_np, masks, boxes)
