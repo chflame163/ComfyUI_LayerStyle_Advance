@@ -152,8 +152,27 @@ def patch_florence2_model_file(model_path):
     Patch modeling_florence2.py for newer transformers compatibility.
     FORCE patch - adds _supports_sdpa = False to ALL classes
     """
-    modeling_file = os.path.join(model_path, "modeling_florence2.py")
+    # Patch BOTH the model file AND the transformers cache
+    files_to_patch = [os.path.join(model_path, "modeling_florence2.py")]
     
+    # Also find and patch cached versions in huggingface cache
+    import glob
+    hf_cache = os.path.expanduser("~/.cache/huggingface/modules/transformers_modules")
+    if os.path.exists(hf_cache):
+        cached_files = glob.glob(f"{hf_cache}/**/modeling_florence2.py", recursive=True)
+        files_to_patch.extend(cached_files)
+        log(f"[PATCH] Found {len(cached_files)} cached Florence2 files")
+    
+    patched_count = 0
+    for modeling_file in files_to_patch:
+        if _patch_single_file(modeling_file):
+            patched_count += 1
+    
+    log(f"[PATCH] Patched {patched_count}/{len(files_to_patch)} files")
+    return patched_count > 0
+
+def _patch_single_file(modeling_file):
+    """Patch a single modeling_florence2.py file"""
     log(f"[PATCH] Checking {modeling_file}")
     
     if not os.path.exists(modeling_file):
@@ -254,6 +273,24 @@ class Florence2SimpleOutput:
             content
         )
         log("[PATCH] Replaced ModelOutput with Florence2SimpleOutput")
+    
+    # Remove @replace_return_docstrings decorators that cause validation errors
+    if '@replace_return_docstrings' in content:
+        content = re.sub(
+            r'@replace_return_docstrings\([^)]*\)\s*\n',
+            '',
+            content
+        )
+        log("[PATCH] Removed @replace_return_docstrings decorators")
+    
+    # Also remove @add_start_docstrings_to_model_forward decorators
+    if '@add_start_docstrings_to_model_forward' in content:
+        content = re.sub(
+            r'@add_start_docstrings_to_model_forward\([^)]*\)\s*\n',
+            '',
+            content
+        )
+        log("[PATCH] Removed @add_start_docstrings_to_model_forward decorators")
     
     # Write the patched file
     with open(modeling_file, 'w', encoding='utf-8') as f:
