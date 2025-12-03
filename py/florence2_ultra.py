@@ -8,9 +8,7 @@ os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
-# Aggressively patch transformers to skip docstring validation
-# This MUST happen before any transformers imports
-import importlib
+# Patch transformers to skip docstring validation (MUST happen before transformers imports)
 import builtins
 
 _original_import = builtins.__import__
@@ -76,9 +74,8 @@ try:
                     return None
                 raise
         ModelOutput.__init_subclass__ = safe_init_subclass
-        print("[FLORENCE2] Patched ModelOutput.__init_subclass__")
-except Exception as e:
-    print(f"[FLORENCE2] Could not patch ModelOutput: {e}")
+except Exception:
+    pass
 
 # CRITICAL: Patch _prepare_output_docstrings which is called by decorators
 try:
@@ -95,9 +92,8 @@ try:
                     return ""
                 raise
         doc_utils._prepare_output_docstrings = patched_prepare_output_docstrings
-        print("[FLORENCE2] Patched _prepare_output_docstrings")
-except Exception as e:
-    print(f"[FLORENCE2] Could not patch _prepare_output_docstrings: {e}")
+except Exception:
+    pass
 
 import comfy.model_management
 from .imagefunc import *
@@ -108,27 +104,6 @@ try:
     torch.backends.cuda.enable_mem_efficient_sdp(False) 
     torch.backends.cuda.enable_math_sdp(True)
 except:
-    pass
-
-# Monkey-patch the _check_and_enable_sdpa function in transformers
-try:
-    import transformers.modeling_utils as modeling_utils
-    original_from_pretrained = modeling_utils.PreTrainedModel.from_pretrained.__func__
-    
-    @classmethod
-    def patched_from_pretrained(cls, *args, **kwargs):
-        # Force eager attention for Florence2 models
-        if 'florence' in str(args[0]).lower() if args else False:
-            kwargs['attn_implementation'] = None
-            # Set _supports_sdpa on the class before loading
-            if not hasattr(cls, '_supports_sdpa'):
-                cls._supports_sdpa = False
-                cls._supports_flash_attn_2 = False
-        return original_from_pretrained(cls, *args, **kwargs)
-    
-    # Don't apply this global patch - too risky
-    # modeling_utils.PreTrainedModel.from_pretrained = patched_from_pretrained
-except Exception as e:
     pass
 
 colormap = ['blue', 'orange', 'green', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan', 'red',
@@ -216,41 +191,25 @@ def patch_florence2_model_file(model_path):
     # Patch BOTH the model file AND the transformers cache
     files_to_patch = [os.path.join(model_path, "modeling_florence2.py")]
     
-    # Also find and patch cached versions in huggingface cache
+    # Also patch cached versions in huggingface cache
     import glob
     hf_cache = os.path.expanduser("~/.cache/huggingface/modules/transformers_modules")
     if os.path.exists(hf_cache):
-        cached_files = glob.glob(f"{hf_cache}/**/modeling_florence2.py", recursive=True)
-        files_to_patch.extend(cached_files)
-        log(f"[PATCH] Found {len(cached_files)} cached Florence2 files")
+        files_to_patch.extend(glob.glob(f"{hf_cache}/**/modeling_florence2.py", recursive=True))
     
-    patched_count = 0
-    for modeling_file in files_to_patch:
-        if _patch_single_file(modeling_file):
-            patched_count += 1
-    
-    log(f"[PATCH] Patched {patched_count}/{len(files_to_patch)} files")
+    patched_count = sum(1 for f in files_to_patch if _patch_single_file(f))
     return patched_count > 0
 
 def _patch_single_file(modeling_file):
-    """Patch a single modeling_florence2.py file"""
-    log(f"[PATCH] Checking {modeling_file}")
-    
+    """Patch a single modeling_florence2.py file for transformers compatibility"""
     if not os.path.exists(modeling_file):
-        log(f"[PATCH] File not found!")
         return False
     
     with open(modeling_file, 'r', encoding='utf-8') as f:
         content = f.read()
     
-    log(f"[PATCH] File size: {len(content)} bytes")
-    log(f"[PATCH] Already patched: {'PATCHED_FOR_NEW_TRANSFORMERS' in content}")
-    log(f"[PATCH] Has _supports_sdpa: {'_supports_sdpa' in content}")
-    log(f"[PATCH] Has _tie_or_clone_weights: {'_tie_or_clone_weights' in content}")
-    
     if '# PATCHED_FOR_NEW_TRANSFORMERS' in content:
-        log("[PATCH] Already patched, skipping")
-        return True
+        return True  # Already patched
     
     # Force add _supports_sdpa to ALL Florence2 classes
     lines = content.split('\n')
@@ -258,38 +217,28 @@ def _patch_single_file(modeling_file):
     
     for i, line in enumerate(lines):
         new_lines.append(line)
-        # After any class definition that contains "Florence2", add the attributes
+        # Add _supports_sdpa = False to all Florence2 classes
         if line.strip().startswith('class ') and 'Florence2' in line and line.strip().endswith(':'):
-            log(f"[PATCH] Found class at line {i+1}: {line.strip()}")
             new_lines.append('    _supports_sdpa = False')
             new_lines.append('    _supports_flash_attn_2 = False')
     
-    # Replace _tie_or_clone_weights
     content = '\n'.join(new_lines)
+    
+    # Replace _tie_or_clone_weights calls (removed in newer transformers)
     if '_tie_or_clone_weights' in content:
         import re
-        old_count = content.count('_tie_or_clone_weights')
         content = re.sub(
             r'self\._tie_or_clone_weights\(([^,]+),\s*([^)]+)\)',
             r'\1.weight = \2.weight',
             content
         )
-        new_count = content.count('_tie_or_clone_weights')
-        log(f"[PATCH] Replaced _tie_or_clone_weights: {old_count} -> {new_count}")
     
-    # PATCH: Fix ALL past_key_values[0][0].shape accesses to handle None
-    # There are multiple places in the code that access past_key_values[0][0].shape
-    # We need to replace ALL of them with safe versions
-    
-    # Pattern 1: past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
-    # This pattern checks if past_key_values is not None but doesn't check if past_key_values[0][0] is None
+    # Fix past_key_values[0][0].shape accesses to handle None values
     old_pattern1 = r'past_key_values_length = past_key_values\[0\]\[0\]\.shape\[2\] if past_key_values is not None else 0'
     new_pattern1 = 'past_key_values_length = past_key_values[0][0].shape[2] if (past_key_values is not None and past_key_values[0] is not None and past_key_values[0][0] is not None) else 0'
     if re.search(old_pattern1, content):
         content = re.sub(old_pattern1, new_pattern1, content)
-        log("[PATCH] ✓ Patched past_key_values_length assignments")
     
-    # Pattern 2: past_length = past_key_values[0][0].shape[2] (standalone)
     old_pattern2 = r'(\s+)past_length = past_key_values\[0\]\[0\]\.shape\[2\](\s*\n)'
     def replace_past_length(match):
         indent = match.group(1)
@@ -297,22 +246,9 @@ def _patch_single_file(modeling_file):
         return f'{indent}past_length = past_key_values[0][0].shape[2] if (past_key_values is not None and past_key_values[0] is not None and past_key_values[0][0] is not None) else 0{newline}'
     if re.search(old_pattern2, content):
         content = re.sub(old_pattern2, replace_past_length, content)
-        log("[PATCH] ✓ Patched past_length assignments")
     
-    # NOTE: Removed complex generate() patches - they were causing issues
-    # If transformers >= 5.x fixes Florence2, update transformers instead
-    # Keeping only essential patches: _supports_sdpa, _tie_or_clone_weights, ModelOutput
-    
-    # CRITICAL FIX: Replace ModelOutput inheritance to avoid docstring validation
-    import re
-    
-    log(f"[PATCH] Checking for ModelOutput inheritance...")
-    model_output_matches = re.findall(r'class (\w+Output)\(ModelOutput\)', content)
-    log(f"[PATCH] Found {len(model_output_matches)} classes inheriting from ModelOutput: {model_output_matches}")
-    
-    # Check if file uses ModelOutput (must contain the inheritance pattern)
+    # Replace ModelOutput inheritance to avoid docstring validation errors
     if re.search(r'class \w+Output\(ModelOutput\)', content):
-        log("[PATCH] ✓ Found ModelOutput inheritance, replacing...")
         
         # Add our simple dataclass at the very beginning of the file
         import_section = """# PATCHED: Simple output class to bypass ModelOutput docstring validation
@@ -358,16 +294,11 @@ class Florence2SimpleOutput:
             content = import_section + content
         
         # Replace ALL ModelOutput inheritance with Florence2SimpleOutput
-        before_replace = content.count('(ModelOutput)')
         content = re.sub(
             r'class (\w+)\(ModelOutput\)',
             r'class \1(Florence2SimpleOutput)',
             content
         )
-        after_replace = content.count('(ModelOutput)')
-        florence2_simple_count = content.count('(Florence2SimpleOutput)')
-        log(f"[PATCH] ✓ Replaced ModelOutput with Florence2SimpleOutput")
-        log(f"[PATCH] Before: {before_replace} ModelOutput, After: {after_replace} ModelOutput, {florence2_simple_count} Florence2SimpleOutput")
     
     # Replace imports of problematic decorators with no-op versions
     # Find where decorators are imported from transformers
@@ -393,43 +324,26 @@ add_start_docstrings_to_model_forward = _noop_decorator
 add_start_docstrings = _noop_decorator
 add_end_docstrings = _noop_decorator
 '''
-            # Replace the import line
             content = re.sub(pattern, '# PATCHED: removed decorator import', content)
-            # Add no-op definitions right after Florence2SimpleOutput class
             if 'class Florence2SimpleOutput' in content:
                 class_end = content.find('\nclass ', content.find('class Florence2SimpleOutput'))
                 if class_end > 0:
                     content = content[:class_end] + '\n' + noop_defs + content[class_end:]
-                    log("[PATCH] Replaced decorator imports with no-op versions")
                     break
     
-    # Validate Python syntax before writing
-    log(f"[PATCH] Validating Python syntax...")
+    # Validate syntax before writing
     try:
         compile(content, modeling_file, 'exec')
-        log(f"[PATCH] ✓ Syntax validation passed")
-    except SyntaxError as e:
-        log(f"[PATCH] ✗ Syntax error after patching: {e} at line {e.lineno}", message_type='error')
-        log(f"[PATCH] Error text: {e.text}")
-        # Try to fix common issues
-        # Remove any double newlines
+    except SyntaxError:
         content = re.sub(r'\n\n\n+', '\n\n', content)
-        log(f"[PATCH] Trying to fix syntax errors...")
-        # Try again
         try:
             compile(content, modeling_file, 'exec')
-            log(f"[PATCH] ✓ Syntax fixed!")
-        except SyntaxError as e2:
-            log(f"[PATCH] ✗ Still has syntax error: {e2} at line {e2.lineno}", message_type='error')
-            log(f"[PATCH] Error text: {e2.text}")
+        except SyntaxError:
             return False
     
-    # Write the patched file
-    log(f"[PATCH] Writing patched file to {modeling_file}...")
     with open(modeling_file, 'w', encoding='utf-8') as f:
         f.write(content)
     
-    log(f"[PATCH] ✓ File patched successfully! ({len(content)} bytes)")
     return True
 
 def load_model(version):
@@ -444,16 +358,14 @@ def load_model(version):
         from huggingface_hub import snapshot_download
         snapshot_download(repo_id=repo_id, local_dir=model_path, ignore_patterns=["*.md", "*.txt"])
     
-    # Patch the model file for newer transformers compatibility
+    # Patch model files for newer transformers compatibility
     patch_florence2_model_file(model_path)
 
     # Clear cached Florence2 modules to ensure patched file is used
-    import sys
     modules_to_remove = [key for key in list(sys.modules.keys()) if 'florence' in key.lower()]
     for mod in modules_to_remove:
         try:
             del sys.modules[mod]
-            log(f"[LOAD] Cleared cached module: {mod}")
         except:
             pass
     
@@ -463,65 +375,34 @@ def load_model(version):
     for mod in modules_to_remove:
         try:
             del sys.modules[mod]
-            log(f"[LOAD] Cleared transformers cache: {mod}")
         except:
             pass
     
-    log(f"[LOAD] Loading model from {model_path}")
-    
-    # Re-patch cache files that might have been created after initial patch
+    # Re-patch cache files
     import glob
     hf_cache = os.path.expanduser("~/.cache/huggingface/modules/transformers_modules")
-    log(f"[LOAD] Checking HuggingFace cache at: {hf_cache}")
-    log(f"[LOAD] Cache exists: {os.path.exists(hf_cache)}")
-    
     if os.path.exists(hf_cache):
-        cached_files = glob.glob(f"{hf_cache}/**/modeling_florence2.py", recursive=True)
-        log(f"[LOAD] Found {len(cached_files)} cached Florence2 files")
-        for cached_file in cached_files:
-            log(f"[LOAD] Re-patching cache file: {cached_file}")
+        for cached_file in glob.glob(f"{hf_cache}/**/modeling_florence2.py", recursive=True):
             _patch_single_file(cached_file)
-            log(f"[LOAD] ✓ Re-patched cache file: {cached_file}")
     
-    # CRITICAL: Patch _prepare_output_docstrings which is called during module loading
-    log("[LOAD] Patching transformers docstring validation...")
+    # Patch _prepare_output_docstrings for runtime docstring validation bypass
     try:
         from transformers.utils import doc as doc_utils
-        log(f"[LOAD] doc_utils imported: {doc_utils}")
-        
         if hasattr(doc_utils, '_prepare_output_docstrings'):
             original_prepare = doc_utils._prepare_output_docstrings
-            log(f"[LOAD] Original _prepare_output_docstrings: {original_prepare}")
-            
             def patched_prepare_output_docstrings(output_type, config_class, min_indent=0):
                 try:
-                    log(f"[LOAD] _prepare_output_docstrings called for: {output_type}")
-                    result = original_prepare(output_type, config_class, min_indent)
-                    log(f"[LOAD] _prepare_output_docstrings succeeded for: {output_type}")
-                    return result
+                    return original_prepare(output_type, config_class, min_indent)
                 except ValueError as e:
-                    error_str = str(e)
-                    log(f"[LOAD] _prepare_output_docstrings exception: {error_str}")
-                    if "Args" in error_str or "Parameters" in error_str:
-                        log(f"[LOAD] ✓ Suppressed docstring error, returning empty string")
+                    if "Args" in str(e) or "Parameters" in str(e):
                         return ""
-                    log(f"[LOAD] ✗ Re-raising exception")
                     raise
-            
             doc_utils._prepare_output_docstrings = patched_prepare_output_docstrings
-            log("[LOAD] ✓ Patched _prepare_output_docstrings")
-        else:
-            log("[LOAD] ✗ doc_utils has no _prepare_output_docstrings")
-    except Exception as e:
-        import traceback
-        log(f"[LOAD] ✗ Could not patch _prepare_output_docstrings: {e}")
-        log(f"[LOAD] Traceback: {traceback.format_exc()}")
+    except:
+        pass
     
-    # Load the model
-    log(f"[LOAD] Starting model load from {model_path}")
-    
+    # Load model
     try:
-        log("[LOAD] Calling AutoModelForCausalLM.from_pretrained...")
         with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
             model = AutoModelForCausalLM.from_pretrained(
                 model_path,
@@ -529,64 +410,18 @@ def load_model(version):
                 torch_dtype=torch.float32,
                 trust_remote_code=True
             )
-            log(f"[LOAD] ✓ Model loaded successfully: {type(model).__name__}")
-            log(f"[LOAD] Model class: {model.__class__}")
-            log(f"[LOAD] Model has _supports_sdpa: {hasattr(model, '_supports_sdpa')}")
-            log(f"[LOAD] Model has 'generate': {hasattr(model, 'generate')}")
-            log(f"[LOAD] Model has 'language_model': {hasattr(model, 'language_model')}")
-            log(f"[LOAD] Model has 'model': {hasattr(model, 'model')}")
             
-            # Patch the loaded model class if needed
+            # Ensure _supports_sdpa is set on model class
             if not hasattr(model.__class__, '_supports_sdpa'):
                 model.__class__._supports_sdpa = False
                 model.__class__._supports_flash_attn_2 = False
-                log(f"[LOAD] ✓ Added _supports_sdpa to {model.__class__.__name__}")
             
-            # Debug: Check model structure
-            if hasattr(model, 'language_model'):
-                lang_model = model.language_model
-                log(f"[LOAD] language_model type: {type(lang_model)}")
-                log(f"[LOAD] language_model has 'generate': {hasattr(lang_model, 'generate')}")
-                log(f"[LOAD] language_model attributes: {[a for a in dir(lang_model) if not a.startswith('_')][:10]}")
-            if hasattr(model, 'model'):
-                sub_model = model.model
-                log(f"[LOAD] model type: {type(sub_model)}")
-                log(f"[LOAD] model has 'generate': {hasattr(sub_model, 'generate')}")
-            
-            # Check if Florence2Seq2SeqLMOutput was loaded and patch it
-            import sys
-            for module_name, module in sys.modules.items():
-                if 'florence' in module_name.lower() and hasattr(module, 'Florence2Seq2SeqLMOutput'):
-                    output_class = getattr(module, 'Florence2Seq2SeqLMOutput')
-                    log(f"[LOAD] Found Florence2Seq2SeqLMOutput in {module_name}")
-                    log(f"[LOAD] Output class: {output_class}")
-                    log(f"[LOAD] Output class bases: {output_class.__bases__}")
-                    # Patch the class to skip docstring validation
-                    if hasattr(output_class, '__init_subclass__'):
-                        original = output_class.__init_subclass__
-                        @classmethod
-                        def patched_init_subclass(cls, **kwargs):
-                            try:
-                                return original.__func__(cls, **kwargs)
-                            except Exception as e:
-                                log(f"[LOAD] Suppressed docstring error in {cls.__name__}: {e}")
-                                return None
-                        output_class.__init_subclass__ = patched_init_subclass
-                        log(f"[LOAD] ✓ Patched Florence2Seq2SeqLMOutput.__init_subclass__")
-            
-            log("[LOAD] Calling AutoProcessor.from_pretrained...")
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-            log(f"[LOAD] ✓ Processor loaded: {type(processor).__name__}")
-            log(f"[LOAD] Processor: {processor}")
             
     except Exception as e:
-        import traceback
-        error_details = traceback.format_exc()
-        log(f"[LOAD] ✗ Error loading model: {str(e)}", message_type='error')
-        log(f"[LOAD] Error details:\n{error_details}", message_type='error')
+        log(f"Error loading Florence2 model: {str(e)}", message_type='error')
         return (None, None)
     
-    log(f"[LOAD] ✓ Successfully loaded model and processor")
     return (model.to(device), processor)
 
 def fig_to_pil(fig):
@@ -701,53 +536,27 @@ def draw_ocr_bboxes(image, prediction):
 
 
 def run_example(model, processor, task_prompt, image, max_new_tokens, num_beams, do_sample, text_input=None):
-    if text_input is None:
-        prompt = task_prompt
-    else:
-        prompt = task_prompt + text_input
+    prompt = task_prompt if text_input is None else task_prompt + text_input
     inputs = processor(text=prompt, images=image, return_tensors="pt").to(device)
     
-    # Check model structure and use the correct generate method
-    log(f"[RUN] Model type: {type(model)}")
-    log(f"[RUN] Model has 'generate': {hasattr(model, 'generate')}")
+    # use_cache=False to avoid past_key_values issues with newer transformers
+    generate_kwargs = dict(
+        input_ids=inputs["input_ids"],
+        pixel_values=inputs["pixel_values"],
+        max_new_tokens=max_new_tokens,
+        early_stopping=False,
+        do_sample=do_sample,
+        num_beams=num_beams,
+        use_cache=False,
+    )
     
-    # Try to use model.generate directly
-    # IMPORTANT: use_cache=False to avoid past_key_values issues with newer transformers
     if hasattr(model, 'generate'):
-        log("[RUN] Using model.generate()")
-        generated_ids = model.generate(
-            input_ids=inputs["input_ids"],
-            pixel_values=inputs["pixel_values"],
-            max_new_tokens=max_new_tokens,
-            early_stopping=False,
-            do_sample=do_sample,
-            num_beams=num_beams,
-            use_cache=False,  # Disable cache to avoid NoneType errors
-        )
+        generated_ids = model.generate(**generate_kwargs)
     elif hasattr(model, 'model') and hasattr(model.model, 'generate'):
-        log("[RUN] Using model.model.generate()")
-        generated_ids = model.model.generate(
-            input_ids=inputs["input_ids"],
-            pixel_values=inputs["pixel_values"],
-            max_new_tokens=max_new_tokens,
-            early_stopping=False,
-            do_sample=do_sample,
-            num_beams=num_beams,
-            use_cache=False,  # Disable cache to avoid NoneType errors
-        )
+        generated_ids = model.model.generate(**generate_kwargs)
     elif hasattr(model, 'language_model') and hasattr(model.language_model, 'generate'):
-        log("[RUN] Using model.language_model.generate()")
-        generated_ids = model.language_model.generate(
-            input_ids=inputs["input_ids"],
-            pixel_values=inputs["pixel_values"],
-            max_new_tokens=max_new_tokens,
-            early_stopping=False,
-            do_sample=do_sample,
-            num_beams=num_beams,
-            use_cache=False,  # Disable cache to avoid NoneType errors
-        )
+        generated_ids = model.language_model.generate(**generate_kwargs)
     else:
-        log("[RUN] ✗ No generate method found!")
         raise AttributeError(f"Model {type(model)} has no generate method")
     generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
     parsed_answer = processor.post_process_generation(
