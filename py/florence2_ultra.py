@@ -274,22 +274,54 @@ class Florence2SimpleOutput:
         )
         log("[PATCH] Replaced ModelOutput with Florence2SimpleOutput")
     
-    # Comment out decorators that cause validation errors (safer than removing)
-    decorator_names = [
-        'replace_return_docstrings',
-        'add_start_docstrings_to_model_forward', 
-        'add_start_docstrings',
+    # Replace imports of problematic decorators with no-op versions
+    # Find where decorators are imported from transformers
+    decorator_imports = [
+        r'from transformers\.utils\.doc import (replace_return_docstrings|add_start_docstrings_to_model_forward|add_start_docstrings|add_end_docstrings)',
+        r'from transformers\.utils import (replace_return_docstrings|add_start_docstrings_to_model_forward|add_start_docstrings|add_end_docstrings)',
     ]
     
-    for dec_name in decorator_names:
-        # Handle single-line decorators: @decorator(args)
-        content = re.sub(
-            rf'(\s*)@{dec_name}\(([^)]*)\)',
-            rf'\1# @{dec_name}(\2)  # PATCHED: commented out',
-            content
-        )
+    for pattern in decorator_imports:
+        if re.search(pattern, content):
+            # Replace the import with our no-op versions
+            noop_defs = '''
+# PATCHED: No-op decorators to bypass docstring validation
+def _noop_decorator(*args, **kwargs):
+    def decorator(fn):
+        return fn
+    if args and callable(args[0]):
+        return args[0]
+    return decorator
+
+replace_return_docstrings = _noop_decorator
+add_start_docstrings_to_model_forward = _noop_decorator  
+add_start_docstrings = _noop_decorator
+add_end_docstrings = _noop_decorator
+'''
+            # Replace the import line
+            content = re.sub(pattern, '# PATCHED: removed decorator import', content)
+            # Add no-op definitions right after Florence2SimpleOutput class
+            if 'class Florence2SimpleOutput' in content:
+                class_end = content.find('\nclass ', content.find('class Florence2SimpleOutput'))
+                if class_end > 0:
+                    content = content[:class_end] + '\n' + noop_defs + content[class_end:]
+                    log("[PATCH] Replaced decorator imports with no-op versions")
+                    break
     
-    log("[PATCH] Commented out docstring decorators")
+    # Validate Python syntax before writing
+    try:
+        compile(content, modeling_file, 'exec')
+    except SyntaxError as e:
+        log(f"[PATCH] Syntax error after patching: {e} at line {e.lineno}", message_type='error')
+        # Try to fix common issues
+        # Remove any double newlines
+        content = re.sub(r'\n\n\n+', '\n\n', content)
+        # Try again
+        try:
+            compile(content, modeling_file, 'exec')
+        except SyntaxError as e2:
+            log(f"[PATCH] Still has syntax error: {e2}", message_type='error')
+            return False
     
     # Write the patched file
     with open(modeling_file, 'w', encoding='utf-8') as f:
