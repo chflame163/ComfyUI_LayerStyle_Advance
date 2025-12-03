@@ -277,6 +277,20 @@ def _patch_single_file(modeling_file):
         new_count = content.count('_tie_or_clone_weights')
         log(f"[PATCH] Replaced _tie_or_clone_weights: {old_count} -> {new_count}")
     
+    # PATCH: Fix prepare_inputs_for_generation to handle None past_key_values
+    # The error occurs when past_key_values[0][0] is None
+    if 'def prepare_inputs_for_generation(' in content and 'past_key_values[0][0].shape' in content:
+        log("[PATCH] Found prepare_inputs_for_generation with past_key_values issue, patching...")
+        # Replace the problematic line that accesses past_key_values[0][0].shape[2]
+        old_pattern = r'past_length = past_key_values\[0\]\[0\]\.shape\[2\]'
+        new_pattern = '''# PATCHED: Handle None past_key_values
+        if past_key_values is not None and len(past_key_values) > 0 and past_key_values[0] is not None and len(past_key_values[0]) > 0 and past_key_values[0][0] is not None:
+            past_length = past_key_values[0][0].shape[2]
+        else:
+            past_length = 0'''
+        content = re.sub(old_pattern, new_pattern, content)
+        log("[PATCH] ✓ Patched prepare_inputs_for_generation to handle None past_key_values")
+    
     # NOTE: Removed complex generate() patches - they were causing issues
     # If transformers >= 5.x fixes Florence2, update transformers instead
     # Keeping only essential patches: _supports_sdpa, _tie_or_clone_weights, ModelOutput
