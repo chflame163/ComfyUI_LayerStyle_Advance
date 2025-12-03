@@ -205,6 +205,13 @@ def patch_florence2_model_file(model_path):
     """
     Patch modeling_florence2.py for newer transformers compatibility.
     FORCE patch - adds _supports_sdpa = False to ALL classes
+    
+    NOTE: If transformers >= 5.x fixes Florence2 compatibility (see issue #39974),
+    consider updating transformers instead of using these patches.
+    These patches are minimal and only fix essential compatibility issues:
+    - _supports_sdpa attribute
+    - _tie_or_clone_weights method
+    - ModelOutput docstring validation
     """
     # Patch BOTH the model file AND the transformers cache
     files_to_patch = [os.path.join(model_path, "modeling_florence2.py")]
@@ -270,74 +277,9 @@ def _patch_single_file(modeling_file):
         new_count = content.count('_tie_or_clone_weights')
         log(f"[PATCH] Replaced _tie_or_clone_weights: {old_count} -> {new_count}")
     
-    # PATCH: Fix Florence2ForConditionalGeneration.generate() to not use language_model.generate()
-    # Instead, we'll make it call the parent's generate directly
-    if 'def generate(' in content and 'self.language_model.generate(' in content:
-        log("[PATCH] Found generate() method using language_model.generate(), patching...")
-        # Replace the call to use the parent class's generate method
-        # We need to extract the arguments and pass them to super().generate()
-        old_pattern = r'return self\.language_model\.generate\(([^)]+)\)'
-        
-        def replace_generate(match):
-            args = match.group(1)
-            return f'''# PATCHED: Use getattr to get generate method directly from language_model instance
-        # Since language_model now inherits from GenerationMixin, generate() should be available
-        generate_method = getattr(self.language_model, 'generate', None)
-        if generate_method:
-            return generate_method({args})
-        # Fallback: try to get from parent classes
-        import inspect
-        for cls in inspect.getmro(type(self.language_model)):
-            if hasattr(cls, 'generate') and cls != type(self.language_model):
-                generate_method = getattr(cls, 'generate')
-                if callable(generate_method):
-                    return generate_method(self.language_model, {args})
-        raise AttributeError("No generate method found")'''
-        
-        content = re.sub(old_pattern, replace_generate, content)
-        log("[PATCH] ✓ Patched generate() to use getattr for generate method")
-    
-    # PATCH: Remove any old PreTrainedModel.generate() calls that might exist from previous patches
-    if 'PreTrainedModel.generate(' in content:
-        log("[PATCH] Found old PreTrainedModel.generate() calls, removing...")
-        # Replace PreTrainedModel.generate(self, *args, **kwargs) with self.generate(*args, **kwargs)
-        # This works because self now inherits from GenerationMixin
-        content = re.sub(
-            r'return PreTrainedModel\.generate\(self(?:\.language_model)?,\s*(\*args,\s*\*\*kwargs)\)',
-            r'return self.generate(\1)',
-            content
-        )
-        # Also handle cases without return
-        content = re.sub(
-            r'PreTrainedModel\.generate\(self(?:\.language_model)?,\s*(\*args,\s*\*\*kwargs)\)',
-            r'self.generate(\1)',
-            content
-        )
-        log("[PATCH] ✓ Removed old PreTrainedModel.generate() calls")
-    
-    # PATCH: Make Florence2LanguageForConditionalGeneration inherit from GenerationMixin
-    # The issue is that language_model.generate() doesn't work because Florence2LanguageForConditionalGeneration
-    # doesn't have generate(). We need to add GenerationMixin to its inheritance.
-    if 'class Florence2LanguageForConditionalGeneration' in content:
-        log("[PATCH] Found Florence2LanguageForConditionalGeneration, adding GenerationMixin...")
-        # Find the class definition and add GenerationMixin to inheritance
-        class_pattern = r'class Florence2LanguageForConditionalGeneration\(([^)]+)\):'
-        class_match = re.search(class_pattern, content)
-        if class_match:
-            current_bases = class_match.group(1)
-            # Check if GenerationMixin is already in bases
-            if 'GenerationMixin' not in current_bases:
-                # Add GenerationMixin to the inheritance
-                new_bases = f'{current_bases}, GenerationMixin'
-                content = re.sub(class_pattern, f'class Florence2LanguageForConditionalGeneration({new_bases}):', content)
-                # Add import at the top if not present
-                if 'from transformers.generation.utils import GenerationMixin' not in content:
-                    # Find a good place to add the import (after other transformers imports)
-                    import_pos = content.find('from transformers')
-                    if import_pos != -1:
-                        next_line = content.find('\n', import_pos)
-                        content = content[:next_line+1] + 'from transformers.generation.utils import GenerationMixin\n' + content[next_line+1:]
-                log("[PATCH] ✓ Added GenerationMixin to Florence2LanguageForConditionalGeneration inheritance")
+    # NOTE: Removed complex generate() patches - they were causing issues
+    # If transformers >= 5.x fixes Florence2, update transformers instead
+    # Keeping only essential patches: _supports_sdpa, _tie_or_clone_weights, ModelOutput
     
     # CRITICAL FIX: Replace ModelOutput inheritance to avoid docstring validation
     import re
