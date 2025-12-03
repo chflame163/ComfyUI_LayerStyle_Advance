@@ -273,6 +273,17 @@ class Florence2SimpleOutput:
             content
         )
         log("[PATCH] Replaced ModelOutput with Florence2SimpleOutput")
+        
+        # Add proper docstring to Florence2Seq2SeqLMOutput if it exists
+        if 'class Florence2Seq2SeqLMOutput' in content:
+            # Find the class and add docstring with Args section
+            pattern = r'(class Florence2Seq2SeqLMOutput\([^)]*\):)\s*\n(\s+)(\"\"\"[^\"\"]*\"\"\")?'
+            def add_docstring(match):
+                class_def = match.group(1)
+                indent = match.group(2)
+                return f'{class_def}\n{indent}"""\n{indent}Output class for Florence2 sequence-to-sequence language model.\n\n{indent}Args:\n{indent}    loss: Optional loss tensor.\n{indent}    logits: Model logits.\n{indent}    past_key_values: Past key values for caching.\n{indent}    decoder_hidden_states: Decoder hidden states.\n{indent}    decoder_attentions: Decoder attention weights.\n{indent}    cross_attentions: Cross attention weights.\n{indent}    encoder_last_hidden_state: Encoder last hidden state.\n{indent}    encoder_hidden_states: Encoder hidden states.\n{indent}    encoder_attentions: Encoder attention weights.\n{indent}    image_hidden_states: Image hidden states.\n{indent}"""'
+            content = re.sub(pattern, add_docstring, content, count=1)
+            log("[PATCH] Added docstring with Args to Florence2Seq2SeqLMOutput")
     
     # Replace imports of problematic decorators with no-op versions
     # Find where decorators are imported from transformers
@@ -366,6 +377,15 @@ def load_model(version):
             pass
     
     log(f"[LOAD] Loading model from {model_path}")
+    
+    # Re-patch cache files that might have been created after initial patch
+    import glob
+    hf_cache = os.path.expanduser("~/.cache/huggingface/modules/transformers_modules")
+    if os.path.exists(hf_cache):
+        cached_files = glob.glob(f"{hf_cache}/**/modeling_florence2.py", recursive=True)
+        for cached_file in cached_files:
+            _patch_single_file(cached_file)
+            log(f"[LOAD] Re-patched cache file: {cached_file}")
     
     # Suppress docstring validation errors by patching ModelOutput
     try:
