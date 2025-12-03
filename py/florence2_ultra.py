@@ -1,11 +1,13 @@
 # layerstyle advance
 
 import io
+import torch
 from unittest.mock import patch
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import colorsys
 from transformers.dynamic_module_utils import get_imports
+from transformers import PreTrainedModel
 import comfy.model_management
 from .imagefunc import *
 
@@ -13,6 +15,33 @@ colormap = ['blue', 'orange', 'green', 'purple', 'brown', 'pink', 'gray', 'olive
             'lime', 'indigo', 'violet', 'aqua', 'magenta', 'coral', 'gold', 'tan', 'skyblue']
 
 device = comfy.model_management.get_torch_device()
+
+def patch_tie_weights_for_newer_transformers():
+    """
+    Patch for Transformers >=4.42 / 5.x:
+    The method `_tie_or_clone_weights` was removed from PreTrainedModel.
+    This adds it back for backwards compatibility with Florence2 models.
+    Based on: https://github.com/kijai/ComfyUI-Florence2/issues/184
+    """
+    if not hasattr(PreTrainedModel, '_tie_or_clone_weights'):
+        def _tie_or_clone_weights(self, output_embeddings, input_embeddings):
+            """Tie or clone module weights depending on whether we are using TorchScript or not"""
+            output_embeddings.weight = input_embeddings.weight
+            if getattr(output_embeddings, "bias", None) is not None:
+                output_embeddings.bias.data = torch.nn.functional.pad(
+                    output_embeddings.bias.data,
+                    (0, output_embeddings.weight.shape[0] - output_embeddings.bias.shape[0]),
+                    "constant",
+                    0,
+                )
+            if hasattr(output_embeddings, "out_features") and hasattr(input_embeddings, "num_embeddings"):
+                output_embeddings.out_features = input_embeddings.num_embeddings
+        
+        PreTrainedModel._tie_or_clone_weights = _tie_or_clone_weights
+        log("Applied _tie_or_clone_weights patch for newer transformers compatibility")
+
+# Apply the patch at module load time
+patch_tie_weights_for_newer_transformers()
 
 fl2_model_repos = {
     "base": "microsoft/Florence-2-base",
