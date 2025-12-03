@@ -197,17 +197,28 @@ def patch_florence2_model_file(model_path):
         new_count = content.count('_tie_or_clone_weights')
         log(f"[PATCH] Replaced _tie_or_clone_weights: {old_count} -> {new_count}")
     
-    # Fix docstrings for Florence2Seq2SeqLMOutput - add Args section if missing
+    # Fix docstrings for ALL *Output classes - add Args section if missing
     import re
-    # Find Florence2Seq2SeqLMOutput class and add proper docstring
-    if 'class Florence2Seq2SeqLMOutput' in content:
-        # Add a proper docstring with Args section
-        content = re.sub(
-            r'(class Florence2Seq2SeqLMOutput[^:]*:)\s*\n(\s*)"""([^"]*)"""',
-            r'\1\n\2"""\3\n\n    Args:\n        loss: Optional loss value\n        logits: Model logits\n    """',
-            content
-        )
-        log("[PATCH] Fixed Florence2Seq2SeqLMOutput docstring")
+    
+    # Find all classes that end with "Output" and might have docstring issues
+    output_classes = re.findall(r'class (\w+Output)\(', content)
+    for class_name in output_classes:
+        # Check if class has a docstring without Args
+        pattern = rf'(class {class_name}\([^)]*\):)\s*\n(\s+)"""'
+        if re.search(pattern, content):
+            # Add Args section to existing docstring
+            def add_args_to_docstring(match):
+                class_def = match.group(1)
+                indent = match.group(2)
+                return f'{class_def}\n{indent}"""\n{indent}Output class.\n\n{indent}Args:\n{indent}    loss: Optional loss.\n{indent}    logits: Model output logits.\n{indent}"""'
+            
+            # Replace simple docstrings
+            content = re.sub(
+                rf'(class {class_name}\([^)]*\):)\s*\n(\s+)"""[^"]*"""',
+                add_args_to_docstring,
+                content
+            )
+            log(f"[PATCH] Fixed {class_name} docstring")
     
     # Write the patched file
     with open(modeling_file, 'w', encoding='utf-8') as f:
@@ -253,6 +264,25 @@ def load_model(version):
     
     log(f"[LOAD] Loading model from {model_path}")
     
+    # Suppress docstring validation errors by patching ModelOutput
+    try:
+        from transformers.utils.generic import ModelOutput
+        if hasattr(ModelOutput, '__init_subclass__'):
+            original_init_subclass = ModelOutput.__init_subclass__
+            @classmethod
+            def safe_init_subclass(cls, **kwargs):
+                try:
+                    return original_init_subclass.__func__(cls, **kwargs)
+                except ValueError as e:
+                    if "Args" in str(e) or "Parameters" in str(e):
+                        log(f"[LOAD] Suppressed docstring error for {cls.__name__}")
+                        return None
+                    raise
+            ModelOutput.__init_subclass__ = safe_init_subclass
+            log("[LOAD] Patched ModelOutput.__init_subclass__")
+    except Exception as e:
+        log(f"[LOAD] Could not patch ModelOutput: {e}")
+    
     # Load the model
     try:
         with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
@@ -263,7 +293,6 @@ def load_model(version):
                 trust_remote_code=True
             )
             log(f"[LOAD] Model loaded: {type(model).__name__}")
-            log(f"[LOAD] Model has _supports_sdpa: {hasattr(model, '_supports_sdpa')}")
             
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
             log(f"[LOAD] Processor loaded: {type(processor).__name__}")
