@@ -8,33 +8,34 @@ os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
-# Patch docstring validation before importing transformers
-try:
-    import transformers.utils.doc as doc_utils
-    # Disable strict docstring validation
-    original_add_start_docstrings = getattr(doc_utils, 'add_start_docstrings', None)
-    if original_add_start_docstrings:
-        def patched_add_start_docstrings(*docstr):
-            def decorator(fn):
-                return fn
-            return decorator
-        doc_utils.add_start_docstrings = patched_add_start_docstrings
-except:
-    pass
+# Aggressively patch transformers to skip docstring validation
+# This MUST happen before any transformers imports
+import importlib
+import builtins
 
-# Patch the docstring parser that causes errors
-try:
-    from transformers.utils import generic
-    if hasattr(generic, 'find_labels'):
-        original_find_labels = generic.find_labels
-        def patched_find_labels(model_class):
-            try:
-                return original_find_labels(model_class)
-            except:
-                return []
-        generic.find_labels = patched_find_labels
-except:
-    pass
+_original_import = builtins.__import__
+
+def _patched_import(name, *args, **kwargs):
+    module = _original_import(name, *args, **kwargs)
+    
+    # Patch ModelOutput when transformers.utils is imported
+    if name == 'transformers.utils' or name.startswith('transformers.utils.'):
+        try:
+            if hasattr(module, 'ModelOutput'):
+                original_init_subclass = module.ModelOutput.__init_subclass__
+                @classmethod  
+                def safe_init_subclass(cls, **kw):
+                    try:
+                        return original_init_subclass.__func__(cls, **kw)
+                    except ValueError:
+                        pass  # Skip docstring errors
+                module.ModelOutput.__init_subclass__ = safe_init_subclass
+        except:
+            pass
+    
+    return module
+
+builtins.__import__ = _patched_import
 
 import io
 import torch
