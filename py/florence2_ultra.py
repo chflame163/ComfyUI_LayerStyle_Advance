@@ -81,6 +81,77 @@ def fixed_get_imports(filename) -> list[str]:
         pass
     return imports
 
+def patch_florence2_model_file(model_path):
+    """
+    Patch modeling_florence2.py for newer transformers compatibility.
+    Based on: https://github.com/kijai/ComfyUI-Florence2/issues/184
+    
+    This patches the tie_weights methods to work without _tie_or_clone_weights
+    which was removed in transformers >=4.42
+    """
+    modeling_file = os.path.join(model_path, "modeling_florence2.py")
+    
+    if not os.path.exists(modeling_file):
+        return False
+    
+    # Check if already patched
+    with open(modeling_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    if '# PATCHED_FOR_NEW_TRANSFORMERS' in content:
+        return True  # Already patched
+    
+    # Old code pattern to replace (Florence2LanguageModel.tie_weights)
+    old_pattern_1 = '''    def tie_weights(self):
+        if self.config.tie_word_embeddings:
+            self._tie_or_clone_weights(self.encoder.embed_tokens, self.shared)
+            self._tie_or_clone_weights(self.decoder.embed_tokens, self.shared)'''
+    
+    new_pattern_1 = '''    def tie_weights(self):
+        # PATCHED_FOR_NEW_TRANSFORMERS
+        if hasattr(self, "shared"):
+            shared_weight = self.shared.weight
+            if hasattr(self, "encoder") and hasattr(self.encoder, "embed_tokens"):
+                self.encoder.embed_tokens.weight = shared_weight
+            if hasattr(self, "decoder") and hasattr(self.decoder, "embed_tokens"):
+                self.decoder.embed_tokens.weight = shared_weight'''
+    
+    # Old code pattern to replace (Florence2ForConditionalGeneration.tie_weights)
+    old_pattern_2 = '''    def tie_weights(self):
+        if self.config.tie_word_embeddings:
+            self._tie_or_clone_weights(self.model.encoder.embed_tokens, self.model.shared)
+            self._tie_or_clone_weights(self.model.decoder.embed_tokens, self.model.shared)
+            self._tie_or_clone_weights(self.lm_head, self.model.shared)'''
+    
+    new_pattern_2 = '''    def tie_weights(self):
+        # PATCHED_FOR_NEW_TRANSFORMERS
+        if hasattr(self.model, "shared"):
+            shared_weight = self.model.shared.weight
+            if hasattr(self.model, "encoder") and hasattr(self.model.encoder, "embed_tokens"):
+                self.model.encoder.embed_tokens.weight = shared_weight
+            if hasattr(self.model, "decoder") and hasattr(self.model.decoder, "embed_tokens"):
+                self.model.decoder.embed_tokens.weight = shared_weight
+            if hasattr(self, "lm_head"):
+                self.lm_head.weight = shared_weight'''
+    
+    patched = False
+    
+    if old_pattern_1 in content:
+        content = content.replace(old_pattern_1, new_pattern_1)
+        patched = True
+    
+    if old_pattern_2 in content:
+        content = content.replace(old_pattern_2, new_pattern_2)
+        patched = True
+    
+    if patched:
+        with open(modeling_file, 'w', encoding='utf-8') as f:
+            f.write(content)
+        log(f"Patched modeling_florence2.py for transformers compatibility")
+        return True
+    
+    return False
+
 def load_model(version):
     florence_path = os.path.join(folder_paths.models_dir, "florence2")
     os.makedirs(florence_path, exist_ok=True)
@@ -92,86 +163,22 @@ def load_model(version):
         repo_id = fl2_model_repos[version]
         from huggingface_hub import snapshot_download
         snapshot_download(repo_id=repo_id, local_dir=model_path, ignore_patterns=["*.md", "*.txt"])
-
-    model = None
-    processor = None
     
-    # Try different attention implementations for compatibility with different transformers versions
-    attention_modes = ['sdpa', 'eager', None]
-    
-    for attention in attention_modes:
-        try:
-            with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
-                load_kwargs = {
-                    'device_map': device,
-                    'torch_dtype': torch.float32,
-                    'trust_remote_code': True
-                }
-                if attention is not None:
-                    load_kwargs['attn_implementation'] = attention
-                
-                model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
-                processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-                
-                if attention:
-                    log(f"Florence2 model loaded with attn_implementation='{attention}'")
-                else:
-                    log(f"Florence2 model loaded with default attention")
-                break
-        except Exception as e:
-            error_str = str(e)
-            if '_supports_sdpa' in error_str or '_supports_flash_attn' in error_str:
-                # Try next attention mode
-                continue
-            # For other errors, try AutoTokenizer as fallback for processor
-            try:
-                with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
-                    load_kwargs = {
-                        'device_map': device,
-                        'torch_dtype': torch.float32,
-                        'trust_remote_code': True
-                    }
-                    if attention is not None:
-                        load_kwargs['attn_implementation'] = attention
-                    
-                    model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
-                    processor = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-                    break
-            except Exception as e2:
-                continue
-    
-    # If all attention modes failed, try legacy loading for specific versions
-    if model is None:
-        try:
-            sys.path.append(model_path)
-            # Import the Florence modules
-            if version == 'large-PromptGen-v1.5':
-                from florence2_large.modeling_florence2 import Florence2ForConditionalGeneration
-                from florence2_large.configuration_florence2 import Florence2Config
-            elif version == 'base-PromptGen-v1.5':
-                from florence2_base_ft.modeling_florence2 import Florence2ForConditionalGeneration
-                from florence2_base_ft.configuration_florence2 import Florence2Config
-            else:
-                log(f"Error loading Florence2 model: all loading methods failed", message_type='error')
-                return (None, None)
+    # Patch the model file for newer transformers compatibility
+    patch_florence2_model_file(model_path)
 
-            # Load the model configuration
-            model_config = Florence2Config.from_pretrained(model_path)
-            # Load the model without attn_implementation for maximum compatibility
-            with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
-                model = Florence2ForConditionalGeneration.from_pretrained(
-                    model_path,
-                    config=model_config,
-                    device_map=device
-                ).to(device)
-
+    # Load the model
+    try:
+        with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
+            model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                device_map=device,
+                torch_dtype=torch.float32,
+                trust_remote_code=True
+            )
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-            log(f"Florence2 model loaded using legacy method")
-        except Exception as e:
-            log(f"Error loading Florence2 model: {str(e)}", message_type='error')
-            return (None, None)
-
-    if model is None:
+    except Exception as e:
+        log(f"Error loading Florence2 model: {str(e)}", message_type='error')
         return (None, None)
     
     return (model.to(device), processor)
