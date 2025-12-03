@@ -499,12 +499,26 @@ def load_model(version):
             log(f"[LOAD] ✓ Model loaded successfully: {type(model).__name__}")
             log(f"[LOAD] Model class: {model.__class__}")
             log(f"[LOAD] Model has _supports_sdpa: {hasattr(model, '_supports_sdpa')}")
+            log(f"[LOAD] Model has 'generate': {hasattr(model, 'generate')}")
+            log(f"[LOAD] Model has 'language_model': {hasattr(model, 'language_model')}")
+            log(f"[LOAD] Model has 'model': {hasattr(model, 'model')}")
             
             # Patch the loaded model class if needed
             if not hasattr(model.__class__, '_supports_sdpa'):
                 model.__class__._supports_sdpa = False
                 model.__class__._supports_flash_attn_2 = False
                 log(f"[LOAD] ✓ Added _supports_sdpa to {model.__class__.__name__}")
+            
+            # Debug: Check model structure
+            if hasattr(model, 'language_model'):
+                lang_model = model.language_model
+                log(f"[LOAD] language_model type: {type(lang_model)}")
+                log(f"[LOAD] language_model has 'generate': {hasattr(lang_model, 'generate')}")
+                log(f"[LOAD] language_model attributes: {[a for a in dir(lang_model) if not a.startswith('_')][:10]}")
+            if hasattr(model, 'model'):
+                sub_model = model.model
+                log(f"[LOAD] model type: {type(sub_model)}")
+                log(f"[LOAD] model has 'generate': {hasattr(sub_model, 'generate')}")
             
             # Check if Florence2Seq2SeqLMOutput was loaded and patch it
             import sys
