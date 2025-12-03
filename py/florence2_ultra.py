@@ -18,22 +18,37 @@ _original_import = builtins.__import__
 def _patched_import(name, *args, **kwargs):
     module = _original_import(name, *args, **kwargs)
     
-    # Patch ModelOutput when transformers.utils is imported
-    if name == 'transformers.utils' or name.startswith('transformers.utils.'):
+    # Patch ModelOutput when ANY transformers module is imported
+    if 'transformers' in name:
         try:
+            # Try to find ModelOutput in this module or its submodules
             if hasattr(module, 'ModelOutput'):
-                original_init_subclass = module.ModelOutput.__init_subclass__
-                @classmethod  
-                def safe_init_subclass(cls, **kw):
-                    try:
-                        return original_init_subclass.__func__(cls, **kw)
-                    except ValueError:
-                        pass  # Skip docstring errors
-                module.ModelOutput.__init_subclass__ = safe_init_subclass
+                _patch_model_output(module.ModelOutput)
+            # Also check utils.generic
+            if hasattr(module, 'utils'):
+                utils = getattr(module, 'utils', None)
+                if utils and hasattr(utils, 'generic'):
+                    generic = getattr(utils, 'generic', None)
+                    if generic and hasattr(generic, 'ModelOutput'):
+                        _patch_model_output(generic.ModelOutput)
         except:
             pass
     
     return module
+
+def _patch_model_output(ModelOutput):
+    """Patch ModelOutput to skip docstring validation"""
+    if hasattr(ModelOutput, '__init_subclass__'):
+        original = ModelOutput.__init_subclass__
+        @classmethod
+        def safe_init_subclass(cls, **kwargs):
+            try:
+                return original.__func__(cls, **kwargs)
+            except ValueError as e:
+                if "Args" in str(e) or "Parameters" in str(e):
+                    return None  # Skip docstring validation
+                raise
+        ModelOutput.__init_subclass__ = safe_init_subclass
 
 builtins.__import__ = _patched_import
 
@@ -45,6 +60,24 @@ import matplotlib.patches as patches
 import colorsys
 from transformers.dynamic_module_utils import get_imports
 from transformers import PreTrainedModel
+
+# CRITICAL: Patch ModelOutput immediately after importing transformers
+try:
+    from transformers.utils.generic import ModelOutput
+    if hasattr(ModelOutput, '__init_subclass__'):
+        original_init_subclass = ModelOutput.__init_subclass__
+        @classmethod
+        def safe_init_subclass(cls, **kwargs):
+            try:
+                return original_init_subclass.__func__(cls, **kwargs)
+            except ValueError as e:
+                if "Args" in str(e) or "Parameters" in str(e):
+                    return None  # Skip docstring validation
+                raise
+        ModelOutput.__init_subclass__ = safe_init_subclass
+except:
+    pass
+
 import comfy.model_management
 from .imagefunc import *
 
