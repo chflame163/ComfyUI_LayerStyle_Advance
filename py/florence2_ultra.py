@@ -1,5 +1,6 @@
 # layerstyle advance
 
+import os
 import io
 import torch
 from unittest.mock import patch
@@ -10,6 +11,12 @@ from transformers.dynamic_module_utils import get_imports
 from transformers import PreTrainedModel
 import comfy.model_management
 from .imagefunc import *
+
+# Disable SDPA to avoid _supports_sdpa errors with newer transformers
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
 
 colormap = ['blue', 'orange', 'green', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan', 'red',
             'lime', 'indigo', 'violet', 'aqua', 'magenta', 'coral', 'gold', 'tan', 'skyblue']
@@ -167,19 +174,31 @@ def load_model(version):
     # Patch the model file for newer transformers compatibility
     patch_florence2_model_file(model_path)
 
-    # Load the model
+    # Load the model with eager attention to avoid SDPA compatibility issues
     try:
         with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
             model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 device_map=device,
                 torch_dtype=torch.float32,
-                trust_remote_code=True
+                trust_remote_code=True,
+                attn_implementation='eager'
             )
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     except Exception as e:
-        log(f"Error loading Florence2 model: {str(e)}", message_type='error')
-        return (None, None)
+        # Fallback: try without attn_implementation
+        try:
+            with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    device_map=device,
+                    torch_dtype=torch.float32,
+                    trust_remote_code=True
+                )
+                processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        except Exception as e2:
+            log(f"Error loading Florence2 model: {str(e2)}", message_type='error')
+            return (None, None)
     
     return (model.to(device), processor)
 
