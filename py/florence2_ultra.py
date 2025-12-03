@@ -93,22 +93,36 @@ def patch_florence2_model_file(model_path):
     Patch modeling_florence2.py for newer transformers compatibility.
     Based on: https://github.com/kijai/ComfyUI-Florence2/issues/184
     
-    This patches the tie_weights methods to work without _tie_or_clone_weights
-    which was removed in transformers >=4.42
+    This patches:
+    1. tie_weights methods to work without _tie_or_clone_weights (removed in transformers >=4.42)
+    2. Adds _supports_sdpa = False to avoid SDPA compatibility checks
     """
     modeling_file = os.path.join(model_path, "modeling_florence2.py")
     
     if not os.path.exists(modeling_file):
         return False
     
-    # Check if already patched
     with open(modeling_file, 'r', encoding='utf-8') as f:
         content = f.read()
     
     if '# PATCHED_FOR_NEW_TRANSFORMERS' in content:
         return True  # Already patched
     
-    # Old code pattern to replace (Florence2LanguageModel.tie_weights)
+    patched = False
+    
+    # PATCH 1: Add _supports_sdpa = False to Florence2ForConditionalGeneration class
+    # This prevents transformers from trying to use SDPA
+    class_def = 'class Florence2ForConditionalGeneration(Florence2PreTrainedModel):'
+    if class_def in content and '_supports_sdpa = False' not in content:
+        new_class_def = '''class Florence2ForConditionalGeneration(Florence2PreTrainedModel):
+    # PATCHED_FOR_NEW_TRANSFORMERS - disable SDPA to avoid compatibility issues
+    _supports_sdpa = False
+    _supports_flash_attn_2 = False'''
+        content = content.replace(class_def, new_class_def)
+        patched = True
+        log("Added _supports_sdpa = False to Florence2ForConditionalGeneration")
+    
+    # PATCH 2: Fix tie_weights in Florence2LanguageModel
     old_pattern_1 = '''    def tie_weights(self):
         if self.config.tie_word_embeddings:
             self._tie_or_clone_weights(self.encoder.embed_tokens, self.shared)
@@ -123,7 +137,12 @@ def patch_florence2_model_file(model_path):
             if hasattr(self, "decoder") and hasattr(self.decoder, "embed_tokens"):
                 self.decoder.embed_tokens.weight = shared_weight'''
     
-    # Old code pattern to replace (Florence2ForConditionalGeneration.tie_weights)
+    if old_pattern_1 in content:
+        content = content.replace(old_pattern_1, new_pattern_1)
+        patched = True
+        log("Patched Florence2LanguageModel.tie_weights")
+    
+    # PATCH 3: Fix tie_weights in Florence2ForConditionalGeneration
     old_pattern_2 = '''    def tie_weights(self):
         if self.config.tie_word_embeddings:
             self._tie_or_clone_weights(self.model.encoder.embed_tokens, self.model.shared)
@@ -141,20 +160,14 @@ def patch_florence2_model_file(model_path):
             if hasattr(self, "lm_head"):
                 self.lm_head.weight = shared_weight'''
     
-    patched = False
-    
-    if old_pattern_1 in content:
-        content = content.replace(old_pattern_1, new_pattern_1)
-        patched = True
-    
     if old_pattern_2 in content:
         content = content.replace(old_pattern_2, new_pattern_2)
         patched = True
+        log("Patched Florence2ForConditionalGeneration.tie_weights")
     
     if patched:
         with open(modeling_file, 'w', encoding='utf-8') as f:
             f.write(content)
-        log(f"Patched modeling_florence2.py for transformers compatibility")
         return True
     
     return False
@@ -174,31 +187,19 @@ def load_model(version):
     # Patch the model file for newer transformers compatibility
     patch_florence2_model_file(model_path)
 
-    # Load the model with eager attention to avoid SDPA compatibility issues
+    # Load the model (model file is already patched with _supports_sdpa = False)
     try:
         with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
             model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 device_map=device,
                 torch_dtype=torch.float32,
-                trust_remote_code=True,
-                attn_implementation='eager'
+                trust_remote_code=True
             )
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     except Exception as e:
-        # Fallback: try without attn_implementation
-        try:
-            with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_path,
-                    device_map=device,
-                    torch_dtype=torch.float32,
-                    trust_remote_code=True
-                )
-                processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-        except Exception as e2:
-            log(f"Error loading Florence2 model: {str(e2)}", message_type='error')
-            return (None, None)
+        log(f"Error loading Florence2 model: {str(e)}", message_type='error')
+        return (None, None)
     
     return (model.to(device), processor)
 
