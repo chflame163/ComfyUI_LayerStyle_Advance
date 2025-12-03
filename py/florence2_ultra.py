@@ -70,13 +70,18 @@ try:
         def safe_init_subclass(cls, **kwargs):
             try:
                 return original_init_subclass.__func__(cls, **kwargs)
-            except ValueError as e:
-                if "Args" in str(e) or "Parameters" in str(e):
-                    return None  # Skip docstring validation
+            except Exception as e:
+                # Catch ALL exceptions related to docstring validation
+                error_str = str(e)
+                if "Args" in error_str or "Parameters" in error_str or "docstring" in error_str.lower():
+                    # Silently skip docstring validation errors
+                    return None
+                # Re-raise other exceptions
                 raise
         ModelOutput.__init_subclass__ = safe_init_subclass
-except:
-    pass
+        print("[FLORENCE2] Patched ModelOutput.__init_subclass__ to skip docstring validation")
+except Exception as e:
+    print(f"[FLORENCE2] Could not patch ModelOutput: {e}")
 
 import comfy.model_management
 from .imagefunc import *
@@ -252,9 +257,13 @@ def _patch_single_file(modeling_file):
     # CRITICAL FIX: Replace ModelOutput inheritance to avoid docstring validation
     import re
     
+    log(f"[PATCH] Checking for ModelOutput inheritance...")
+    model_output_matches = re.findall(r'class (\w+Output)\(ModelOutput\)', content)
+    log(f"[PATCH] Found {len(model_output_matches)} classes inheriting from ModelOutput: {model_output_matches}")
+    
     # Check if file uses ModelOutput (must contain the inheritance pattern)
     if re.search(r'class \w+Output\(ModelOutput\)', content):
-        log("[PATCH] Found ModelOutput inheritance, replacing...")
+        log("[PATCH] ✓ Found ModelOutput inheritance, replacing...")
         
         # Add our simple dataclass at the very beginning of the file
         import_section = """# PATCHED: Simple output class to bypass ModelOutput docstring validation
@@ -300,12 +309,16 @@ class Florence2SimpleOutput:
             content = import_section + content
         
         # Replace ALL ModelOutput inheritance with Florence2SimpleOutput
+        before_replace = content.count('(ModelOutput)')
         content = re.sub(
             r'class (\w+)\(ModelOutput\)',
             r'class \1(Florence2SimpleOutput)',
             content
         )
-        log("[PATCH] Replaced ModelOutput with Florence2SimpleOutput")
+        after_replace = content.count('(ModelOutput)')
+        florence2_simple_count = content.count('(Florence2SimpleOutput)')
+        log(f"[PATCH] ✓ Replaced ModelOutput with Florence2SimpleOutput")
+        log(f"[PATCH] Before: {before_replace} ModelOutput, After: {after_replace} ModelOutput, {florence2_simple_count} Florence2SimpleOutput")
     
     # Replace imports of problematic decorators with no-op versions
     # Find where decorators are imported from transformers
@@ -342,25 +355,32 @@ add_end_docstrings = _noop_decorator
                     break
     
     # Validate Python syntax before writing
+    log(f"[PATCH] Validating Python syntax...")
     try:
         compile(content, modeling_file, 'exec')
+        log(f"[PATCH] ✓ Syntax validation passed")
     except SyntaxError as e:
-        log(f"[PATCH] Syntax error after patching: {e} at line {e.lineno}", message_type='error')
+        log(f"[PATCH] ✗ Syntax error after patching: {e} at line {e.lineno}", message_type='error')
+        log(f"[PATCH] Error text: {e.text}")
         # Try to fix common issues
         # Remove any double newlines
         content = re.sub(r'\n\n\n+', '\n\n', content)
+        log(f"[PATCH] Trying to fix syntax errors...")
         # Try again
         try:
             compile(content, modeling_file, 'exec')
+            log(f"[PATCH] ✓ Syntax fixed!")
         except SyntaxError as e2:
-            log(f"[PATCH] Still has syntax error: {e2}", message_type='error')
+            log(f"[PATCH] ✗ Still has syntax error: {e2} at line {e2.lineno}", message_type='error')
+            log(f"[PATCH] Error text: {e2.text}")
             return False
     
     # Write the patched file
+    log(f"[PATCH] Writing patched file to {modeling_file}...")
     with open(modeling_file, 'w', encoding='utf-8') as f:
         f.write(content)
     
-    log(f"[PATCH] File patched successfully!")
+    log(f"[PATCH] ✓ File patched successfully! ({len(content)} bytes)")
     return True
 
 def load_model(version):
@@ -403,33 +423,59 @@ def load_model(version):
     # Re-patch cache files that might have been created after initial patch
     import glob
     hf_cache = os.path.expanduser("~/.cache/huggingface/modules/transformers_modules")
+    log(f"[LOAD] Checking HuggingFace cache at: {hf_cache}")
+    log(f"[LOAD] Cache exists: {os.path.exists(hf_cache)}")
+    
     if os.path.exists(hf_cache):
         cached_files = glob.glob(f"{hf_cache}/**/modeling_florence2.py", recursive=True)
+        log(f"[LOAD] Found {len(cached_files)} cached Florence2 files")
         for cached_file in cached_files:
+            log(f"[LOAD] Re-patching cache file: {cached_file}")
             _patch_single_file(cached_file)
-            log(f"[LOAD] Re-patched cache file: {cached_file}")
+            log(f"[LOAD] ✓ Re-patched cache file: {cached_file}")
     
-    # Suppress docstring validation errors by patching ModelOutput
+    # Suppress docstring validation errors by patching ModelOutput (again, just to be sure)
+    log("[LOAD] Checking ModelOutput patch...")
     try:
         from transformers.utils.generic import ModelOutput
+        log(f"[LOAD] ModelOutput imported: {ModelOutput}")
+        log(f"[LOAD] ModelOutput has __init_subclass__: {hasattr(ModelOutput, '__init_subclass__')}")
+        
         if hasattr(ModelOutput, '__init_subclass__'):
             original_init_subclass = ModelOutput.__init_subclass__
+            log(f"[LOAD] Original __init_subclass__: {original_init_subclass}")
+            
             @classmethod
             def safe_init_subclass(cls, **kwargs):
                 try:
-                    return original_init_subclass.__func__(cls, **kwargs)
-                except ValueError as e:
-                    if "Args" in str(e) or "Parameters" in str(e):
-                        log(f"[LOAD] Suppressed docstring error for {cls.__name__}")
+                    log(f"[LOAD] __init_subclass__ called for: {cls.__name__}")
+                    result = original_init_subclass.__func__(cls, **kwargs)
+                    log(f"[LOAD] __init_subclass__ succeeded for: {cls.__name__}")
+                    return result
+                except Exception as e:
+                    # Catch ALL exceptions related to docstring validation
+                    error_str = str(e)
+                    log(f"[LOAD] __init_subclass__ exception for {cls.__name__}: {error_str}")
+                    if "Args" in error_str or "Parameters" in error_str or "docstring" in error_str.lower():
+                        log(f"[LOAD] ✓ Suppressed docstring error for {cls.__name__}")
                         return None
+                    log(f"[LOAD] ✗ Re-raising exception for {cls.__name__}")
                     raise
+            
             ModelOutput.__init_subclass__ = safe_init_subclass
-            log("[LOAD] Patched ModelOutput.__init_subclass__")
+            log("[LOAD] ✓ Patched ModelOutput.__init_subclass__")
+        else:
+            log("[LOAD] ✗ ModelOutput has no __init_subclass__")
     except Exception as e:
-        log(f"[LOAD] Could not patch ModelOutput: {e}")
+        import traceback
+        log(f"[LOAD] ✗ Could not patch ModelOutput: {e}")
+        log(f"[LOAD] Traceback: {traceback.format_exc()}")
     
     # Load the model
+    log(f"[LOAD] Starting model load from {model_path}")
+    
     try:
+        log("[LOAD] Calling AutoModelForCausalLM.from_pretrained...")
         with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
             model = AutoModelForCausalLM.from_pretrained(
                 model_path,
@@ -437,14 +483,50 @@ def load_model(version):
                 torch_dtype=torch.float32,
                 trust_remote_code=True
             )
-            log(f"[LOAD] Model loaded: {type(model).__name__}")
+            log(f"[LOAD] ✓ Model loaded successfully: {type(model).__name__}")
+            log(f"[LOAD] Model class: {model.__class__}")
+            log(f"[LOAD] Model has _supports_sdpa: {hasattr(model, '_supports_sdpa')}")
             
+            # Patch the loaded model class if needed
+            if not hasattr(model.__class__, '_supports_sdpa'):
+                model.__class__._supports_sdpa = False
+                model.__class__._supports_flash_attn_2 = False
+                log(f"[LOAD] ✓ Added _supports_sdpa to {model.__class__.__name__}")
+            
+            # Check if Florence2Seq2SeqLMOutput was loaded and patch it
+            import sys
+            for module_name, module in sys.modules.items():
+                if 'florence' in module_name.lower() and hasattr(module, 'Florence2Seq2SeqLMOutput'):
+                    output_class = getattr(module, 'Florence2Seq2SeqLMOutput')
+                    log(f"[LOAD] Found Florence2Seq2SeqLMOutput in {module_name}")
+                    log(f"[LOAD] Output class: {output_class}")
+                    log(f"[LOAD] Output class bases: {output_class.__bases__}")
+                    # Patch the class to skip docstring validation
+                    if hasattr(output_class, '__init_subclass__'):
+                        original = output_class.__init_subclass__
+                        @classmethod
+                        def patched_init_subclass(cls, **kwargs):
+                            try:
+                                return original.__func__(cls, **kwargs)
+                            except Exception as e:
+                                log(f"[LOAD] Suppressed docstring error in {cls.__name__}: {e}")
+                                return None
+                        output_class.__init_subclass__ = patched_init_subclass
+                        log(f"[LOAD] ✓ Patched Florence2Seq2SeqLMOutput.__init_subclass__")
+            
+            log("[LOAD] Calling AutoProcessor.from_pretrained...")
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-            log(f"[LOAD] Processor loaded: {type(processor).__name__}")
+            log(f"[LOAD] ✓ Processor loaded: {type(processor).__name__}")
+            log(f"[LOAD] Processor: {processor}")
+            
     except Exception as e:
-        log(f"[LOAD] Error: {str(e)}", message_type='error')
+        import traceback
+        error_details = traceback.format_exc()
+        log(f"[LOAD] ✗ Error loading model: {str(e)}", message_type='error')
+        log(f"[LOAD] Error details:\n{error_details}", message_type='error')
         return (None, None)
     
+    log(f"[LOAD] ✓ Successfully loaded model and processor")
     return (model.to(device), processor)
 
 def fig_to_pil(fig):
