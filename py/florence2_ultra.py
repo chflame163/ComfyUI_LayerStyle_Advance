@@ -712,6 +712,7 @@ def run_example(model, processor, task_prompt, image, max_new_tokens, num_beams,
     log(f"[RUN] Model has 'generate': {hasattr(model, 'generate')}")
     
     # Try to use model.generate directly
+    # IMPORTANT: use_cache=False to avoid past_key_values issues with newer transformers
     if hasattr(model, 'generate'):
         log("[RUN] Using model.generate()")
         generated_ids = model.generate(
@@ -721,6 +722,7 @@ def run_example(model, processor, task_prompt, image, max_new_tokens, num_beams,
             early_stopping=False,
             do_sample=do_sample,
             num_beams=num_beams,
+            use_cache=False,  # Disable cache to avoid NoneType errors
         )
     elif hasattr(model, 'model') and hasattr(model.model, 'generate'):
         log("[RUN] Using model.model.generate()")
@@ -731,6 +733,7 @@ def run_example(model, processor, task_prompt, image, max_new_tokens, num_beams,
             early_stopping=False,
             do_sample=do_sample,
             num_beams=num_beams,
+            use_cache=False,  # Disable cache to avoid NoneType errors
         )
     elif hasattr(model, 'language_model') and hasattr(model.language_model, 'generate'):
         log("[RUN] Using model.language_model.generate()")
@@ -741,6 +744,7 @@ def run_example(model, processor, task_prompt, image, max_new_tokens, num_beams,
             early_stopping=False,
             do_sample=do_sample,
             num_beams=num_beams,
+            use_cache=False,  # Disable cache to avoid NoneType errors
         )
     else:
         log("[RUN] ✗ No generate method found!")
