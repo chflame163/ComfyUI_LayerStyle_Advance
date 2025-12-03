@@ -189,39 +189,27 @@ def load_model(version):
     # Patch the model file for newer transformers compatibility
     patch_florence2_model_file(model_path)
 
-    # Clear any cached Florence2 modules
+    # Clear cached Florence2 modules to ensure patched file is used
     import sys
-    import importlib.util
-    
     modules_to_remove = [key for key in list(sys.modules.keys()) if 'florence' in key.lower()]
     for mod in modules_to_remove:
         try:
             del sys.modules[mod]
+            log(f"[LOAD] Cleared cached module: {mod}")
         except:
             pass
     
-    # Pre-load and patch the Florence2 module before transformers loads it
-    modeling_file = os.path.join(model_path, "modeling_florence2.py")
-    if os.path.exists(modeling_file):
+    # Also clear transformers module cache for this model
+    cache_key = f"transformers_modules.{os.path.basename(model_path)}"
+    modules_to_remove = [key for key in list(sys.modules.keys()) if cache_key in key]
+    for mod in modules_to_remove:
         try:
-            spec = importlib.util.spec_from_file_location("modeling_florence2_patched", modeling_file)
-            florence_module = importlib.util.module_from_spec(spec)
-            
-            # Patch the module before executing
-            # Add _supports_sdpa to any class that inherits from PreTrainedModel
-            original_exec = spec.loader.exec_module
-            def patched_exec(module):
-                original_exec(module)
-                # Patch all Florence2 model classes
-                for name, obj in list(module.__dict__.items()):
-                    if isinstance(obj, type) and 'Florence2' in name:
-                        if not hasattr(obj, '_supports_sdpa'):
-                            obj._supports_sdpa = False
-                            obj._supports_flash_attn_2 = False
-                            log(f"Patched {name} with _supports_sdpa=False")
-            spec.loader.exec_module = patched_exec
-        except Exception as e:
-            log(f"Could not pre-patch Florence2 module: {e}")
+            del sys.modules[mod]
+            log(f"[LOAD] Cleared transformers cache: {mod}")
+        except:
+            pass
+    
+    log(f"[LOAD] Loading model from {model_path}")
     
     # Load the model
     try:
@@ -232,9 +220,13 @@ def load_model(version):
                 torch_dtype=torch.float32,
                 trust_remote_code=True
             )
+            log(f"[LOAD] Model loaded: {type(model).__name__}")
+            log(f"[LOAD] Model has _supports_sdpa: {hasattr(model, '_supports_sdpa')}")
+            
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+            log(f"[LOAD] Processor loaded: {type(processor).__name__}")
     except Exception as e:
-        log(f"Error loading Florence2 model: {str(e)}", message_type='error')
+        log(f"[LOAD] Error: {str(e)}", message_type='error')
         return (None, None)
     
     return (model.to(device), processor)
