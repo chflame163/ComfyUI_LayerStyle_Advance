@@ -673,14 +673,45 @@ def run_example(model, processor, task_prompt, image, max_new_tokens, num_beams,
     else:
         prompt = task_prompt + text_input
     inputs = processor(text=prompt, images=image, return_tensors="pt").to(device)
-    generated_ids = model.generate(
-        input_ids=inputs["input_ids"],
-        pixel_values=inputs["pixel_values"],
-        max_new_tokens=max_new_tokens,
-        early_stopping=False,
-        do_sample=do_sample,
-        num_beams=num_beams,
-    )
+    
+    # Check model structure and use the correct generate method
+    log(f"[RUN] Model type: {type(model)}")
+    log(f"[RUN] Model has 'generate': {hasattr(model, 'generate')}")
+    
+    # Try to use model.generate directly
+    if hasattr(model, 'generate'):
+        log("[RUN] Using model.generate()")
+        generated_ids = model.generate(
+            input_ids=inputs["input_ids"],
+            pixel_values=inputs["pixel_values"],
+            max_new_tokens=max_new_tokens,
+            early_stopping=False,
+            do_sample=do_sample,
+            num_beams=num_beams,
+        )
+    elif hasattr(model, 'model') and hasattr(model.model, 'generate'):
+        log("[RUN] Using model.model.generate()")
+        generated_ids = model.model.generate(
+            input_ids=inputs["input_ids"],
+            pixel_values=inputs["pixel_values"],
+            max_new_tokens=max_new_tokens,
+            early_stopping=False,
+            do_sample=do_sample,
+            num_beams=num_beams,
+        )
+    elif hasattr(model, 'language_model') and hasattr(model.language_model, 'generate'):
+        log("[RUN] Using model.language_model.generate()")
+        generated_ids = model.language_model.generate(
+            input_ids=inputs["input_ids"],
+            pixel_values=inputs["pixel_values"],
+            max_new_tokens=max_new_tokens,
+            early_stopping=False,
+            do_sample=do_sample,
+            num_beams=num_beams,
+        )
+    else:
+        log("[RUN] ✗ No generate method found!")
+        raise AttributeError(f"Model {type(model)} has no generate method")
     generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
     parsed_answer = processor.post_process_generation(
         generated_text,
