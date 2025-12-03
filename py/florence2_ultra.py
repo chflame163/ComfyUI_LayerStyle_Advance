@@ -270,6 +270,34 @@ def _patch_single_file(modeling_file):
         new_count = content.count('_tie_or_clone_weights')
         log(f"[PATCH] Replaced _tie_or_clone_weights: {old_count} -> {new_count}")
     
+    # PATCH: Add generate method to Florence2LanguageForConditionalGeneration
+    # The issue is that language_model.generate() doesn't work because Florence2LanguageForConditionalGeneration
+    # doesn't have generate(). We need to add it by making it inherit from PreTrainedModel's generate.
+    if 'class Florence2LanguageForConditionalGeneration' in content:
+        log("[PATCH] Found Florence2LanguageForConditionalGeneration, adding generate method...")
+        # Find the class definition and add generate method after it
+        class_match = re.search(r'(class Florence2LanguageForConditionalGeneration\([^)]*\):)', content)
+        if class_match:
+            class_end = class_match.end()
+            # Find the next method or end of class
+            next_method = content.find('\n    def ', class_end)
+            if next_method == -1:
+                next_method = content.find('\nclass ', class_end)
+            if next_method == -1:
+                next_method = len(content)
+            
+            # Add generate method that delegates to PreTrainedModel
+            generate_method = '''
+    # PATCHED: Add generate method for compatibility
+    def generate(self, *args, **kwargs):
+        \"\"\"Generate method patched for compatibility.\"\"\"
+        from transformers import PreTrainedModel
+        # Use PreTrainedModel's generate method
+        return PreTrainedModel.generate(self, *args, **kwargs)
+'''
+            content = content[:next_method] + generate_method + content[next_method:]
+            log("[PATCH] ✓ Added generate() method to Florence2LanguageForConditionalGeneration")
+    
     # CRITICAL FIX: Replace ModelOutput inheritance to avoid docstring validation
     import re
     
