@@ -1,6 +1,12 @@
 # layerstyle advance
 
 import os
+import sys
+
+# CRITICAL: Set environment BEFORE any transformers import
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+
 import io
 import torch
 from unittest.mock import patch
@@ -12,25 +18,33 @@ from transformers import PreTrainedModel
 import comfy.model_management
 from .imagefunc import *
 
-# Disable SDPA to avoid _supports_sdpa errors with newer transformers
-os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
-os.environ["ATTN_BACKEND"] = "eager"
-
-# Force eager attention in transformers
-try:
-    from transformers.modeling_utils import PreTrainedModel as TransformersPreTrainedModel
-    # Add _supports_sdpa to base class if missing
-    if not hasattr(TransformersPreTrainedModel, '_supports_sdpa'):
-        TransformersPreTrainedModel._supports_sdpa = False
-        TransformersPreTrainedModel._supports_flash_attn_2 = False
-except:
-    pass
-
+# Disable CUDA SDPA backends
 try:
     torch.backends.cuda.enable_flash_sdp(False)
     torch.backends.cuda.enable_mem_efficient_sdp(False) 
     torch.backends.cuda.enable_math_sdp(True)
 except:
+    pass
+
+# Monkey-patch the _check_and_enable_sdpa function in transformers
+try:
+    import transformers.modeling_utils as modeling_utils
+    original_from_pretrained = modeling_utils.PreTrainedModel.from_pretrained.__func__
+    
+    @classmethod
+    def patched_from_pretrained(cls, *args, **kwargs):
+        # Force eager attention for Florence2 models
+        if 'florence' in str(args[0]).lower() if args else False:
+            kwargs['attn_implementation'] = None
+            # Set _supports_sdpa on the class before loading
+            if not hasattr(cls, '_supports_sdpa'):
+                cls._supports_sdpa = False
+                cls._supports_flash_attn_2 = False
+        return original_from_pretrained(cls, *args, **kwargs)
+    
+    # Don't apply this global patch - too risky
+    # modeling_utils.PreTrainedModel.from_pretrained = patched_from_pretrained
+except Exception as e:
     pass
 
 colormap = ['blue', 'orange', 'green', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan', 'red',
@@ -106,61 +120,59 @@ def fixed_get_imports(filename) -> list[str]:
 def patch_florence2_model_file(model_path):
     """
     Patch modeling_florence2.py for newer transformers compatibility.
-    Based on: https://github.com/kijai/ComfyUI-Florence2/issues/184
+    FORCE patch - adds _supports_sdpa = False to ALL classes
     """
-    import re
-    
     modeling_file = os.path.join(model_path, "modeling_florence2.py")
     
+    log(f"[PATCH] Checking {modeling_file}")
+    
     if not os.path.exists(modeling_file):
-        log(f"modeling_florence2.py not found at {model_path}")
+        log(f"[PATCH] File not found!")
         return False
     
     with open(modeling_file, 'r', encoding='utf-8') as f:
         content = f.read()
     
+    log(f"[PATCH] File size: {len(content)} bytes")
+    log(f"[PATCH] Already patched: {'PATCHED_FOR_NEW_TRANSFORMERS' in content}")
+    log(f"[PATCH] Has _supports_sdpa: {'_supports_sdpa' in content}")
+    log(f"[PATCH] Has _tie_or_clone_weights: {'_tie_or_clone_weights' in content}")
+    
     if '# PATCHED_FOR_NEW_TRANSFORMERS' in content:
-        log("Model file already patched")
+        log("[PATCH] Already patched, skipping")
         return True
     
-    original_content = content
-    patched_items = []
+    # Force add _supports_sdpa to ALL Florence2 classes
+    lines = content.split('\n')
+    new_lines = ['# PATCHED_FOR_NEW_TRANSFORMERS']
     
-    # PATCH 1: Add _supports_sdpa = False to Florence2ForConditionalGeneration class
-    if 'class Florence2ForConditionalGeneration' in content and '_supports_sdpa' not in content:
-        # Use regex to find the class definition
-        pattern = r'(class Florence2ForConditionalGeneration\([^)]+\):)'
-        replacement = r'''\1
-    # PATCHED_FOR_NEW_TRANSFORMERS - disable SDPA
-    _supports_sdpa = False
-    _supports_flash_attn_2 = False'''
-        content, count = re.subn(pattern, replacement, content)
-        if count > 0:
-            patched_items.append("_supports_sdpa")
+    for i, line in enumerate(lines):
+        new_lines.append(line)
+        # After any class definition that contains "Florence2", add the attributes
+        if line.strip().startswith('class ') and 'Florence2' in line and line.strip().endswith(':'):
+            log(f"[PATCH] Found class at line {i+1}: {line.strip()}")
+            new_lines.append('    _supports_sdpa = False')
+            new_lines.append('    _supports_flash_attn_2 = False')
     
-    # PATCH 2: Replace _tie_or_clone_weights calls with direct weight assignment
-    # This handles any method that uses _tie_or_clone_weights
+    # Replace _tie_or_clone_weights
+    content = '\n'.join(new_lines)
     if '_tie_or_clone_weights' in content:
-        # Replace self._tie_or_clone_weights(a, b) with a.weight = b.weight
+        import re
+        old_count = content.count('_tie_or_clone_weights')
         content = re.sub(
             r'self\._tie_or_clone_weights\(([^,]+),\s*([^)]+)\)',
             r'\1.weight = \2.weight',
             content
         )
-        # Add marker comment at the top
-        if '# PATCHED_FOR_NEW_TRANSFORMERS' not in content:
-            content = '# PATCHED_FOR_NEW_TRANSFORMERS\n' + content
-        patched_items.append("_tie_or_clone_weights")
+        new_count = content.count('_tie_or_clone_weights')
+        log(f"[PATCH] Replaced _tie_or_clone_weights: {old_count} -> {new_count}")
     
-    if content != original_content:
-        with open(modeling_file, 'w', encoding='utf-8') as f:
-            f.write(content)
-        log(f"Patched modeling_florence2.py: {', '.join(patched_items)}")
-        return True
-    else:
-        log("No patches needed or patterns not found")
+    # Write the patched file
+    with open(modeling_file, 'w', encoding='utf-8') as f:
+        f.write(content)
     
-    return False
+    log(f"[PATCH] File patched successfully!")
+    return True
 
 def load_model(version):
     florence_path = os.path.join(folder_paths.models_dir, "florence2")
@@ -177,50 +189,53 @@ def load_model(version):
     # Patch the model file for newer transformers compatibility
     patch_florence2_model_file(model_path)
 
+    # Clear any cached Florence2 modules
+    import sys
+    import importlib.util
+    
+    modules_to_remove = [key for key in list(sys.modules.keys()) if 'florence' in key.lower()]
+    for mod in modules_to_remove:
+        try:
+            del sys.modules[mod]
+        except:
+            pass
+    
+    # Pre-load and patch the Florence2 module before transformers loads it
+    modeling_file = os.path.join(model_path, "modeling_florence2.py")
+    if os.path.exists(modeling_file):
+        try:
+            spec = importlib.util.spec_from_file_location("modeling_florence2_patched", modeling_file)
+            florence_module = importlib.util.module_from_spec(spec)
+            
+            # Patch the module before executing
+            # Add _supports_sdpa to any class that inherits from PreTrainedModel
+            original_exec = spec.loader.exec_module
+            def patched_exec(module):
+                original_exec(module)
+                # Patch all Florence2 model classes
+                for name, obj in list(module.__dict__.items()):
+                    if isinstance(obj, type) and 'Florence2' in name:
+                        if not hasattr(obj, '_supports_sdpa'):
+                            obj._supports_sdpa = False
+                            obj._supports_flash_attn_2 = False
+                            log(f"Patched {name} with _supports_sdpa=False")
+            spec.loader.exec_module = patched_exec
+        except Exception as e:
+            log(f"Could not pre-patch Florence2 module: {e}")
+    
     # Load the model
     try:
         with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
-            # Import the model class first and patch it
-            from transformers import AutoConfig
-            config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-            
-            # Try to get the model class and patch _supports_sdpa
-            try:
-                model_class = config.auto_map.get("AutoModelForCausalLM", None)
-                if model_class:
-                    # The class will be loaded dynamically, we patch after loading
-                    pass
-            except:
-                pass
-            
             model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 device_map=device,
                 torch_dtype=torch.float32,
-                trust_remote_code=True,
-                attn_implementation="eager"  # Force eager attention
+                trust_remote_code=True
             )
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     except Exception as e:
-        error_msg = str(e)
-        # If SDPA error, try without attn_implementation
-        if '_supports_sdpa' in error_msg or '_supports_flash' in error_msg:
-            log(f"SDPA not supported, retrying with default attention...")
-            try:
-                with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
-                    model = AutoModelForCausalLM.from_pretrained(
-                        model_path,
-                        device_map=device,
-                        torch_dtype=torch.float32,
-                        trust_remote_code=True
-                    )
-                    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-            except Exception as e2:
-                log(f"Error loading Florence2 model: {str(e2)}", message_type='error')
-                return (None, None)
-        else:
-            log(f"Error loading Florence2 model: {error_msg}", message_type='error')
-            return (None, None)
+        log(f"Error loading Florence2 model: {str(e)}", message_type='error')
+        return (None, None)
     
     return (model.to(device), processor)
 
