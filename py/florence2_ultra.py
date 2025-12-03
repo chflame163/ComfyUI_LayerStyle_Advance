@@ -277,26 +277,27 @@ def _patch_single_file(modeling_file):
         new_count = content.count('_tie_or_clone_weights')
         log(f"[PATCH] Replaced _tie_or_clone_weights: {old_count} -> {new_count}")
     
-    # PATCH: Fix prepare_inputs_for_generation to handle None past_key_values
-    # The error occurs when past_key_values[0][0] is None
-    if 'past_key_values[0][0].shape[2]' in content:
-        log("[PATCH] Found prepare_inputs_for_generation with past_key_values issue, patching...")
-        # Find the line and replace it with proper indentation
-        lines = content.split('\n')
-        for i, line in enumerate(lines):
-            if 'past_length = past_key_values[0][0].shape[2]' in line:
-                # Get the indentation from the original line
-                indent = len(line) - len(line.lstrip())
-                indent_str = ' ' * indent
-                # Replace with safe version
-                lines[i] = f'{indent_str}# PATCHED: Handle None past_key_values'
-                lines.insert(i + 1, f'{indent_str}if past_key_values is not None and len(past_key_values) > 0 and past_key_values[0] is not None and len(past_key_values[0]) > 0 and past_key_values[0][0] is not None:')
-                lines.insert(i + 2, f'{indent_str}    past_length = past_key_values[0][0].shape[2]')
-                lines.insert(i + 3, f'{indent_str}else:')
-                lines.insert(i + 4, f'{indent_str}    past_length = 0')
-                content = '\n'.join(lines)
-                log("[PATCH] ✓ Patched prepare_inputs_for_generation to handle None past_key_values")
-                break
+    # PATCH: Fix ALL past_key_values[0][0].shape accesses to handle None
+    # There are multiple places in the code that access past_key_values[0][0].shape
+    # We need to replace ALL of them with safe versions
+    
+    # Pattern 1: past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
+    # This pattern checks if past_key_values is not None but doesn't check if past_key_values[0][0] is None
+    old_pattern1 = r'past_key_values_length = past_key_values\[0\]\[0\]\.shape\[2\] if past_key_values is not None else 0'
+    new_pattern1 = 'past_key_values_length = past_key_values[0][0].shape[2] if (past_key_values is not None and past_key_values[0] is not None and past_key_values[0][0] is not None) else 0'
+    if re.search(old_pattern1, content):
+        content = re.sub(old_pattern1, new_pattern1, content)
+        log("[PATCH] ✓ Patched past_key_values_length assignments")
+    
+    # Pattern 2: past_length = past_key_values[0][0].shape[2] (standalone)
+    old_pattern2 = r'(\s+)past_length = past_key_values\[0\]\[0\]\.shape\[2\](\s*\n)'
+    def replace_past_length(match):
+        indent = match.group(1)
+        newline = match.group(2)
+        return f'{indent}past_length = past_key_values[0][0].shape[2] if (past_key_values is not None and past_key_values[0] is not None and past_key_values[0][0] is not None) else 0{newline}'
+    if re.search(old_pattern2, content):
+        content = re.sub(old_pattern2, replace_past_length, content)
+        log("[PATCH] ✓ Patched past_length assignments")
     
     # NOTE: Removed complex generate() patches - they were causing issues
     # If transformers >= 5.x fixes Florence2, update transformers instead
