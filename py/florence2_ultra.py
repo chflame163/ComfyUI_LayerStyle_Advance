@@ -274,23 +274,22 @@ class Florence2SimpleOutput:
         )
         log("[PATCH] Replaced ModelOutput with Florence2SimpleOutput")
     
-    # Remove @replace_return_docstrings decorators that cause validation errors
-    if '@replace_return_docstrings' in content:
-        content = re.sub(
-            r'@replace_return_docstrings\([^)]*\)\s*\n',
-            '',
-            content
-        )
-        log("[PATCH] Removed @replace_return_docstrings decorators")
+    # Comment out decorators that cause validation errors (safer than removing)
+    decorator_names = [
+        'replace_return_docstrings',
+        'add_start_docstrings_to_model_forward', 
+        'add_start_docstrings',
+    ]
     
-    # Also remove @add_start_docstrings_to_model_forward decorators
-    if '@add_start_docstrings_to_model_forward' in content:
+    for dec_name in decorator_names:
+        # Handle single-line decorators: @decorator(args)
         content = re.sub(
-            r'@add_start_docstrings_to_model_forward\([^)]*\)\s*\n',
-            '',
+            rf'(\s*)@{dec_name}\(([^)]*)\)',
+            rf'\1# @{dec_name}(\2)  # PATCHED: commented out',
             content
         )
-        log("[PATCH] Removed @add_start_docstrings_to_model_forward decorators")
+    
+    log("[PATCH] Commented out docstring decorators")
     
     # Write the patched file
     with open(modeling_file, 'w', encoding='utf-8') as f:
