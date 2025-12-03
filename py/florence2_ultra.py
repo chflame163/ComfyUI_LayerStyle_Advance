@@ -61,7 +61,7 @@ import colorsys
 from transformers.dynamic_module_utils import get_imports
 from transformers import PreTrainedModel
 
-# CRITICAL: Patch ModelOutput immediately after importing transformers
+# CRITICAL: Patch transformers docstring validation functions
 try:
     from transformers.utils.generic import ModelOutput
     if hasattr(ModelOutput, '__init_subclass__'):
@@ -71,17 +71,33 @@ try:
             try:
                 return original_init_subclass.__func__(cls, **kwargs)
             except Exception as e:
-                # Catch ALL exceptions related to docstring validation
                 error_str = str(e)
                 if "Args" in error_str or "Parameters" in error_str or "docstring" in error_str.lower():
-                    # Silently skip docstring validation errors
                     return None
-                # Re-raise other exceptions
                 raise
         ModelOutput.__init_subclass__ = safe_init_subclass
-        print("[FLORENCE2] Patched ModelOutput.__init_subclass__ to skip docstring validation")
+        print("[FLORENCE2] Patched ModelOutput.__init_subclass__")
 except Exception as e:
     print(f"[FLORENCE2] Could not patch ModelOutput: {e}")
+
+# CRITICAL: Patch _prepare_output_docstrings which is called by decorators
+try:
+    from transformers.utils import doc as doc_utils
+    if hasattr(doc_utils, '_prepare_output_docstrings'):
+        original_prepare = doc_utils._prepare_output_docstrings
+        def patched_prepare_output_docstrings(output_type, config_class, min_indent=0):
+            try:
+                return original_prepare(output_type, config_class, min_indent)
+            except ValueError as e:
+                error_str = str(e)
+                if "Args" in error_str or "Parameters" in error_str:
+                    # Return empty docstring instead of raising
+                    return ""
+                raise
+        doc_utils._prepare_output_docstrings = patched_prepare_output_docstrings
+        print("[FLORENCE2] Patched _prepare_output_docstrings")
+except Exception as e:
+    print(f"[FLORENCE2] Could not patch _prepare_output_docstrings: {e}")
 
 import comfy.model_management
 from .imagefunc import *
@@ -434,41 +450,38 @@ def load_model(version):
             _patch_single_file(cached_file)
             log(f"[LOAD] ✓ Re-patched cache file: {cached_file}")
     
-    # Suppress docstring validation errors by patching ModelOutput (again, just to be sure)
-    log("[LOAD] Checking ModelOutput patch...")
+    # CRITICAL: Patch _prepare_output_docstrings which is called during module loading
+    log("[LOAD] Patching transformers docstring validation...")
     try:
-        from transformers.utils.generic import ModelOutput
-        log(f"[LOAD] ModelOutput imported: {ModelOutput}")
-        log(f"[LOAD] ModelOutput has __init_subclass__: {hasattr(ModelOutput, '__init_subclass__')}")
+        from transformers.utils import doc as doc_utils
+        log(f"[LOAD] doc_utils imported: {doc_utils}")
         
-        if hasattr(ModelOutput, '__init_subclass__'):
-            original_init_subclass = ModelOutput.__init_subclass__
-            log(f"[LOAD] Original __init_subclass__: {original_init_subclass}")
+        if hasattr(doc_utils, '_prepare_output_docstrings'):
+            original_prepare = doc_utils._prepare_output_docstrings
+            log(f"[LOAD] Original _prepare_output_docstrings: {original_prepare}")
             
-            @classmethod
-            def safe_init_subclass(cls, **kwargs):
+            def patched_prepare_output_docstrings(output_type, config_class, min_indent=0):
                 try:
-                    log(f"[LOAD] __init_subclass__ called for: {cls.__name__}")
-                    result = original_init_subclass.__func__(cls, **kwargs)
-                    log(f"[LOAD] __init_subclass__ succeeded for: {cls.__name__}")
+                    log(f"[LOAD] _prepare_output_docstrings called for: {output_type}")
+                    result = original_prepare(output_type, config_class, min_indent)
+                    log(f"[LOAD] _prepare_output_docstrings succeeded for: {output_type}")
                     return result
-                except Exception as e:
-                    # Catch ALL exceptions related to docstring validation
+                except ValueError as e:
                     error_str = str(e)
-                    log(f"[LOAD] __init_subclass__ exception for {cls.__name__}: {error_str}")
-                    if "Args" in error_str or "Parameters" in error_str or "docstring" in error_str.lower():
-                        log(f"[LOAD] ✓ Suppressed docstring error for {cls.__name__}")
-                        return None
-                    log(f"[LOAD] ✗ Re-raising exception for {cls.__name__}")
+                    log(f"[LOAD] _prepare_output_docstrings exception: {error_str}")
+                    if "Args" in error_str or "Parameters" in error_str:
+                        log(f"[LOAD] ✓ Suppressed docstring error, returning empty string")
+                        return ""
+                    log(f"[LOAD] ✗ Re-raising exception")
                     raise
             
-            ModelOutput.__init_subclass__ = safe_init_subclass
-            log("[LOAD] ✓ Patched ModelOutput.__init_subclass__")
+            doc_utils._prepare_output_docstrings = patched_prepare_output_docstrings
+            log("[LOAD] ✓ Patched _prepare_output_docstrings")
         else:
-            log("[LOAD] ✗ ModelOutput has no __init_subclass__")
+            log("[LOAD] ✗ doc_utils has no _prepare_output_docstrings")
     except Exception as e:
         import traceback
-        log(f"[LOAD] ✗ Could not patch ModelOutput: {e}")
+        log(f"[LOAD] ✗ Could not patch _prepare_output_docstrings: {e}")
         log(f"[LOAD] Traceback: {traceback.format_exc()}")
     
     # Load the model
