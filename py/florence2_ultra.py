@@ -200,60 +200,60 @@ def patch_florence2_model_file(model_path):
     # CRITICAL FIX: Replace ModelOutput inheritance to avoid docstring validation
     import re
     
-    # Check if file uses ModelOutput
-    if 'ModelOutput' in content and 'from dataclasses import dataclass' not in content:
-        # Add dataclass import at the top (after existing imports)
+    # Check if file uses ModelOutput (must contain the inheritance pattern)
+    if re.search(r'class \w+Output\(ModelOutput\)', content):
+        log("[PATCH] Found ModelOutput inheritance, replacing...")
+        
+        # Add our simple dataclass at the very beginning of the file
         import_section = """# PATCHED: Simple output class to bypass ModelOutput docstring validation
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Tuple, Any
-import torch
 
 @dataclass 
-class Florence2BaseModelOutput:
+class Florence2SimpleOutput:
     \"\"\"
-    Base output class for Florence2 models.
+    Simple output class for Florence2 models.
     
     Args:
         loss: Optional loss tensor.
         logits: Model logits.
         last_hidden_state: Last hidden state.
-        hidden_states: All hidden states.
-        attentions: Attention weights.
+        past_key_values: Past key values for caching.
+        decoder_hidden_states: Decoder hidden states.
+        decoder_attentions: Decoder attention weights.
+        cross_attentions: Cross attention weights.
+        encoder_last_hidden_state: Encoder last hidden state.
+        encoder_hidden_states: Encoder hidden states.
+        encoder_attentions: Encoder attention weights.
+        image_hidden_states: Image hidden states.
     \"\"\"
-    loss: Optional[torch.Tensor] = None
-    logits: Optional[torch.Tensor] = None
-    last_hidden_state: Optional[torch.Tensor] = None
-    hidden_states: Optional[Tuple[torch.Tensor]] = None
-    attentions: Optional[Tuple[torch.Tensor]] = None
-    encoder_last_hidden_state: Optional[torch.Tensor] = None
-    encoder_hidden_states: Optional[Tuple[torch.Tensor]] = None
-    encoder_attentions: Optional[Tuple[torch.Tensor]] = None
-    past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None
-    decoder_hidden_states: Optional[Tuple[torch.Tensor]] = None
-    decoder_attentions: Optional[Tuple[torch.Tensor]] = None
-    cross_attentions: Optional[Tuple[torch.Tensor]] = None
-    image_hidden_states: Optional[torch.Tensor] = None
+    loss: Any = None
+    logits: Any = None
+    last_hidden_state: Any = None
+    past_key_values: Any = None
+    decoder_hidden_states: Any = None
+    decoder_attentions: Any = None
+    cross_attentions: Any = None
+    encoder_last_hidden_state: Any = None
+    encoder_hidden_states: Any = None
+    encoder_attentions: Any = None
+    image_hidden_states: Any = None
 
 """
-        # Insert after the first import block
-        lines = content.split('\n')
-        insert_idx = 0
-        for i, line in enumerate(lines):
-            if line.startswith('import ') or line.startswith('from '):
-                insert_idx = i + 1
-            elif insert_idx > 0 and not line.strip().startswith('#') and line.strip() and not line.startswith('import') and not line.startswith('from'):
-                break
+        # Add at the beginning, after the first line if it's a comment
+        if content.startswith('#'):
+            first_newline = content.find('\n')
+            content = content[:first_newline+1] + import_section + content[first_newline+1:]
+        else:
+            content = import_section + content
         
-        lines.insert(insert_idx, import_section)
-        content = '\n'.join(lines)
-        
-        # Replace all *Output(ModelOutput) with *Output(Florence2BaseModelOutput)
+        # Replace ALL ModelOutput inheritance with Florence2SimpleOutput
         content = re.sub(
-            r'class (\w+Output)\(ModelOutput\)',
-            r'class \1(Florence2BaseModelOutput)',
+            r'class (\w+)\(ModelOutput\)',
+            r'class \1(Florence2SimpleOutput)',
             content
         )
-        log("[PATCH] Replaced ModelOutput with Florence2BaseModelOutput")
+        log("[PATCH] Replaced ModelOutput with Florence2SimpleOutput")
     
     # Write the patched file
     with open(modeling_file, 'w', encoding='utf-8') as f:
