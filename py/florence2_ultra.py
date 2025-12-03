@@ -197,28 +197,63 @@ def patch_florence2_model_file(model_path):
         new_count = content.count('_tie_or_clone_weights')
         log(f"[PATCH] Replaced _tie_or_clone_weights: {old_count} -> {new_count}")
     
-    # Fix docstrings for ALL *Output classes - add Args section if missing
+    # CRITICAL FIX: Replace ModelOutput inheritance to avoid docstring validation
     import re
     
-    # Find all classes that end with "Output" and might have docstring issues
-    output_classes = re.findall(r'class (\w+Output)\(', content)
-    for class_name in output_classes:
-        # Check if class has a docstring without Args
-        pattern = rf'(class {class_name}\([^)]*\):)\s*\n(\s+)"""'
-        if re.search(pattern, content):
-            # Add Args section to existing docstring
-            def add_args_to_docstring(match):
-                class_def = match.group(1)
-                indent = match.group(2)
-                return f'{class_def}\n{indent}"""\n{indent}Output class.\n\n{indent}Args:\n{indent}    loss: Optional loss.\n{indent}    logits: Model output logits.\n{indent}"""'
-            
-            # Replace simple docstrings
-            content = re.sub(
-                rf'(class {class_name}\([^)]*\):)\s*\n(\s+)"""[^"]*"""',
-                add_args_to_docstring,
-                content
-            )
-            log(f"[PATCH] Fixed {class_name} docstring")
+    # Check if file uses ModelOutput
+    if 'ModelOutput' in content and 'from dataclasses import dataclass' not in content:
+        # Add dataclass import at the top (after existing imports)
+        import_section = """# PATCHED: Simple output class to bypass ModelOutput docstring validation
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, Any
+import torch
+
+@dataclass 
+class Florence2BaseModelOutput:
+    \"\"\"
+    Base output class for Florence2 models.
+    
+    Args:
+        loss: Optional loss tensor.
+        logits: Model logits.
+        last_hidden_state: Last hidden state.
+        hidden_states: All hidden states.
+        attentions: Attention weights.
+    \"\"\"
+    loss: Optional[torch.Tensor] = None
+    logits: Optional[torch.Tensor] = None
+    last_hidden_state: Optional[torch.Tensor] = None
+    hidden_states: Optional[Tuple[torch.Tensor]] = None
+    attentions: Optional[Tuple[torch.Tensor]] = None
+    encoder_last_hidden_state: Optional[torch.Tensor] = None
+    encoder_hidden_states: Optional[Tuple[torch.Tensor]] = None
+    encoder_attentions: Optional[Tuple[torch.Tensor]] = None
+    past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None
+    decoder_hidden_states: Optional[Tuple[torch.Tensor]] = None
+    decoder_attentions: Optional[Tuple[torch.Tensor]] = None
+    cross_attentions: Optional[Tuple[torch.Tensor]] = None
+    image_hidden_states: Optional[torch.Tensor] = None
+
+"""
+        # Insert after the first import block
+        lines = content.split('\n')
+        insert_idx = 0
+        for i, line in enumerate(lines):
+            if line.startswith('import ') or line.startswith('from '):
+                insert_idx = i + 1
+            elif insert_idx > 0 and not line.strip().startswith('#') and line.strip() and not line.startswith('import') and not line.startswith('from'):
+                break
+        
+        lines.insert(insert_idx, import_section)
+        content = '\n'.join(lines)
+        
+        # Replace all *Output(ModelOutput) with *Output(Florence2BaseModelOutput)
+        content = re.sub(
+            r'class (\w+Output)\(ModelOutput\)',
+            r'class \1(Florence2BaseModelOutput)',
+            content
+        )
+        log("[PATCH] Replaced ModelOutput with Florence2BaseModelOutput")
     
     # Write the patched file
     with open(modeling_file, 'w', encoding='utf-8') as f:
