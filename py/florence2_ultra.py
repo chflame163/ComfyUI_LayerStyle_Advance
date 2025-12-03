@@ -16,13 +16,14 @@ colormap = ['blue', 'orange', 'green', 'purple', 'brown', 'pink', 'gray', 'olive
 
 device = comfy.model_management.get_torch_device()
 
-def patch_tie_weights_for_newer_transformers():
+def patch_transformers_for_florence2():
     """
-    Patch for Transformers >=4.42 / 5.x:
-    The method `_tie_or_clone_weights` was removed from PreTrainedModel.
-    This adds it back for backwards compatibility with Florence2 models.
+    Patches for Transformers >=4.42 / 5.x compatibility with Florence2 models.
     Based on: https://github.com/kijai/ComfyUI-Florence2/issues/184
     """
+    patched = []
+    
+    # Patch 1: _tie_or_clone_weights was removed in newer transformers
     if not hasattr(PreTrainedModel, '_tie_or_clone_weights'):
         def _tie_or_clone_weights(self, output_embeddings, input_embeddings):
             """Tie or clone module weights depending on whether we are using TorchScript or not"""
@@ -38,10 +39,18 @@ def patch_tie_weights_for_newer_transformers():
                 output_embeddings.out_features = input_embeddings.num_embeddings
         
         PreTrainedModel._tie_or_clone_weights = _tie_or_clone_weights
-        log("Applied _tie_or_clone_weights patch for newer transformers compatibility")
+        patched.append("_tie_or_clone_weights")
+    
+    # Patch 2: _supports_sdpa attribute check changed in newer transformers
+    if not hasattr(PreTrainedModel, '_supports_sdpa'):
+        PreTrainedModel._supports_sdpa = True
+        patched.append("_supports_sdpa")
+    
+    if patched:
+        log(f"Applied Florence2 compatibility patches: {', '.join(patched)}")
 
-# Apply the patch at module load time
-patch_tie_weights_for_newer_transformers()
+# Apply patches at module load time
+patch_transformers_for_florence2()
 
 fl2_model_repos = {
     "base": "microsoft/Florence-2-base",
@@ -77,7 +86,6 @@ def load_model(version):
     os.makedirs(florence_path, exist_ok=True)
 
     model_path = os.path.join(florence_path, version)
-    attention = 'sdpa'
 
     if not os.path.exists(model_path):
         log(f"Downloading Florence2 {version} model...")
@@ -85,18 +93,56 @@ def load_model(version):
         from huggingface_hub import snapshot_download
         snapshot_download(repo_id=repo_id, local_dir=model_path, ignore_patterns=["*.md", "*.txt"])
 
-    try:
-        with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
-            # model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
-            model = AutoModelForCausalLM.from_pretrained(model_path, attn_implementation=attention, device_map=device,
-                                                         torch_dtype=torch.float32, trust_remote_code=True)
-            processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-    except Exception as e:
+    model = None
+    processor = None
+    
+    # Try different attention implementations for compatibility with different transformers versions
+    attention_modes = ['sdpa', 'eager', None]
+    
+    for attention in attention_modes:
         try:
-            model = AutoModelForCausalLM.from_pretrained(model_path, attn_implementation=attention, device_map=device,
-                                                         torch_dtype=torch.float32, trust_remote_code=True)
-            processor = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
+                load_kwargs = {
+                    'device_map': device,
+                    'torch_dtype': torch.float32,
+                    'trust_remote_code': True
+                }
+                if attention is not None:
+                    load_kwargs['attn_implementation'] = attention
+                
+                model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
+                processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+                
+                if attention:
+                    log(f"Florence2 model loaded with attn_implementation='{attention}'")
+                else:
+                    log(f"Florence2 model loaded with default attention")
+                break
         except Exception as e:
+            error_str = str(e)
+            if '_supports_sdpa' in error_str or '_supports_flash_attn' in error_str:
+                # Try next attention mode
+                continue
+            # For other errors, try AutoTokenizer as fallback for processor
+            try:
+                with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
+                    load_kwargs = {
+                        'device_map': device,
+                        'torch_dtype': torch.float32,
+                        'trust_remote_code': True
+                    }
+                    if attention is not None:
+                        load_kwargs['attn_implementation'] = attention
+                    
+                    model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
+                    processor = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                    break
+            except Exception as e2:
+                continue
+    
+    # If all attention modes failed, try legacy loading for specific versions
+    if model is None:
+        try:
             sys.path.append(model_path)
             # Import the Florence modules
             if version == 'large-PromptGen-v1.5':
@@ -106,22 +152,28 @@ def load_model(version):
                 from florence2_base_ft.modeling_florence2 import Florence2ForConditionalGeneration
                 from florence2_base_ft.configuration_florence2 import Florence2Config
             else:
-                log(f"Error loading model or tokenizer: {str(e)}", message_type='error')
+                log(f"Error loading Florence2 model: all loading methods failed", message_type='error')
                 return (None, None)
 
             # Load the model configuration
             model_config = Florence2Config.from_pretrained(model_path)
-            # Load the model
+            # Load the model without attn_implementation for maximum compatibility
             with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
                 model = Florence2ForConditionalGeneration.from_pretrained(
                     model_path,
                     config=model_config,
-                    attn_implementation=attention,
                     device_map=device
                 ).to(device)
 
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+            log(f"Florence2 model loaded using legacy method")
+        except Exception as e:
+            log(f"Error loading Florence2 model: {str(e)}", message_type='error')
+            return (None, None)
 
+    if model is None:
+        return (None, None)
+    
     return (model.to(device), processor)
 
 def fig_to_pil(fig):
