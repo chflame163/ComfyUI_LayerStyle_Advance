@@ -6,6 +6,35 @@ import sys
 # CRITICAL: Set environment BEFORE any transformers import
 os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+# Patch docstring validation before importing transformers
+try:
+    import transformers.utils.doc as doc_utils
+    # Disable strict docstring validation
+    original_add_start_docstrings = getattr(doc_utils, 'add_start_docstrings', None)
+    if original_add_start_docstrings:
+        def patched_add_start_docstrings(*docstr):
+            def decorator(fn):
+                return fn
+            return decorator
+        doc_utils.add_start_docstrings = patched_add_start_docstrings
+except:
+    pass
+
+# Patch the docstring parser that causes errors
+try:
+    from transformers.utils import generic
+    if hasattr(generic, 'find_labels'):
+        original_find_labels = generic.find_labels
+        def patched_find_labels(model_class):
+            try:
+                return original_find_labels(model_class)
+            except:
+                return []
+        generic.find_labels = patched_find_labels
+except:
+    pass
 
 import io
 import torch
@@ -166,6 +195,18 @@ def patch_florence2_model_file(model_path):
         )
         new_count = content.count('_tie_or_clone_weights')
         log(f"[PATCH] Replaced _tie_or_clone_weights: {old_count} -> {new_count}")
+    
+    # Fix docstrings for Florence2Seq2SeqLMOutput - add Args section if missing
+    import re
+    # Find Florence2Seq2SeqLMOutput class and add proper docstring
+    if 'class Florence2Seq2SeqLMOutput' in content:
+        # Add a proper docstring with Args section
+        content = re.sub(
+            r'(class Florence2Seq2SeqLMOutput[^:]*:)\s*\n(\s*)"""([^"]*)"""',
+            r'\1\n\2"""\3\n\n    Args:\n        loss: Optional loss value\n        logits: Model logits\n    """',
+            content
+        )
+        log("[PATCH] Fixed Florence2Seq2SeqLMOutput docstring")
     
     # Write the patched file
     with open(modeling_file, 'w', encoding='utf-8') as f:
