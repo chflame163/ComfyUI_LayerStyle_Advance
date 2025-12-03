@@ -279,17 +279,24 @@ def _patch_single_file(modeling_file):
     
     # PATCH: Fix prepare_inputs_for_generation to handle None past_key_values
     # The error occurs when past_key_values[0][0] is None
-    if 'def prepare_inputs_for_generation(' in content and 'past_key_values[0][0].shape' in content:
+    if 'past_key_values[0][0].shape[2]' in content:
         log("[PATCH] Found prepare_inputs_for_generation with past_key_values issue, patching...")
-        # Replace the problematic line that accesses past_key_values[0][0].shape[2]
-        old_pattern = r'past_length = past_key_values\[0\]\[0\]\.shape\[2\]'
-        new_pattern = '''# PATCHED: Handle None past_key_values
-        if past_key_values is not None and len(past_key_values) > 0 and past_key_values[0] is not None and len(past_key_values[0]) > 0 and past_key_values[0][0] is not None:
-            past_length = past_key_values[0][0].shape[2]
-        else:
-            past_length = 0'''
-        content = re.sub(old_pattern, new_pattern, content)
-        log("[PATCH] ✓ Patched prepare_inputs_for_generation to handle None past_key_values")
+        # Find the line and replace it with proper indentation
+        lines = content.split('\n')
+        for i, line in enumerate(lines):
+            if 'past_length = past_key_values[0][0].shape[2]' in line:
+                # Get the indentation from the original line
+                indent = len(line) - len(line.lstrip())
+                indent_str = ' ' * indent
+                # Replace with safe version
+                lines[i] = f'{indent_str}# PATCHED: Handle None past_key_values'
+                lines.insert(i + 1, f'{indent_str}if past_key_values is not None and len(past_key_values) > 0 and past_key_values[0] is not None and len(past_key_values[0]) > 0 and past_key_values[0][0] is not None:')
+                lines.insert(i + 2, f'{indent_str}    past_length = past_key_values[0][0].shape[2]')
+                lines.insert(i + 3, f'{indent_str}else:')
+                lines.insert(i + 4, f'{indent_str}    past_length = 0')
+                content = '\n'.join(lines)
+                log("[PATCH] ✓ Patched prepare_inputs_for_generation to handle None past_key_values")
+                break
     
     # NOTE: Removed complex generate() patches - they were causing issues
     # If transformers >= 5.x fixes Florence2, update transformers instead
