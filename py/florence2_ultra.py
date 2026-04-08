@@ -1,18 +1,151 @@
 # layerstyle advance
 
+import os
+import sys
+
+# CRITICAL: Set environment BEFORE any transformers import
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+# Patch transformers to skip docstring validation (MUST happen before transformers imports)
+import builtins
+
+_original_import = builtins.__import__
+
+def _patched_import(name, *args, **kwargs):
+    module = _original_import(name, *args, **kwargs)
+    
+    # Patch ModelOutput when ANY transformers module is imported
+    if 'transformers' in name:
+        try:
+            # Try to find ModelOutput in this module or its submodules
+            if hasattr(module, 'ModelOutput'):
+                _patch_model_output(module.ModelOutput)
+            # Also check utils.generic
+            if hasattr(module, 'utils'):
+                utils = getattr(module, 'utils', None)
+                if utils and hasattr(utils, 'generic'):
+                    generic = getattr(utils, 'generic', None)
+                    if generic and hasattr(generic, 'ModelOutput'):
+                        _patch_model_output(generic.ModelOutput)
+        except:
+            pass
+    
+    return module
+
+def _patch_model_output(ModelOutput):
+    """Patch ModelOutput to skip docstring validation"""
+    if hasattr(ModelOutput, '__init_subclass__'):
+        original = ModelOutput.__init_subclass__
+        @classmethod
+        def safe_init_subclass(cls, **kwargs):
+            try:
+                return original.__func__(cls, **kwargs)
+            except ValueError as e:
+                if "Args" in str(e) or "Parameters" in str(e):
+                    return None  # Skip docstring validation
+                raise
+        ModelOutput.__init_subclass__ = safe_init_subclass
+
+builtins.__import__ = _patched_import
+
 import io
+import torch
 from unittest.mock import patch
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import colorsys
 from transformers.dynamic_module_utils import get_imports
+from transformers import PreTrainedModel
+
+# CRITICAL: Patch transformers docstring validation functions
+try:
+    from transformers.utils.generic import ModelOutput
+    if hasattr(ModelOutput, '__init_subclass__'):
+        original_init_subclass = ModelOutput.__init_subclass__
+        @classmethod
+        def safe_init_subclass(cls, **kwargs):
+            try:
+                return original_init_subclass.__func__(cls, **kwargs)
+            except Exception as e:
+                error_str = str(e)
+                if "Args" in error_str or "Parameters" in error_str or "docstring" in error_str.lower():
+                    return None
+                raise
+        ModelOutput.__init_subclass__ = safe_init_subclass
+except Exception:
+    pass
+
+# CRITICAL: Patch _prepare_output_docstrings which is called by decorators
+try:
+    from transformers.utils import doc as doc_utils
+    if hasattr(doc_utils, '_prepare_output_docstrings'):
+        original_prepare = doc_utils._prepare_output_docstrings
+        def patched_prepare_output_docstrings(output_type, config_class, min_indent=0):
+            try:
+                return original_prepare(output_type, config_class, min_indent)
+            except ValueError as e:
+                error_str = str(e)
+                if "Args" in error_str or "Parameters" in error_str:
+                    # Return empty docstring instead of raising
+                    return ""
+                raise
+        doc_utils._prepare_output_docstrings = patched_prepare_output_docstrings
+except Exception:
+    pass
+
 import comfy.model_management
 from .imagefunc import *
+
+# Disable CUDA SDPA backends
+try:
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False) 
+    torch.backends.cuda.enable_math_sdp(True)
+except:
+    pass
 
 colormap = ['blue', 'orange', 'green', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan', 'red',
             'lime', 'indigo', 'violet', 'aqua', 'magenta', 'coral', 'gold', 'tan', 'skyblue']
 
 device = comfy.model_management.get_torch_device()
+
+def patch_transformers_for_florence2():
+    """
+    Patches for Transformers >=4.42 / 5.x compatibility with Florence2 models.
+    Based on: https://github.com/kijai/ComfyUI-Florence2/issues/184
+    """
+    patched = []
+    
+    # Patch 1: _tie_or_clone_weights was removed in newer transformers
+    if not hasattr(PreTrainedModel, '_tie_or_clone_weights'):
+        def _tie_or_clone_weights(self, output_embeddings, input_embeddings):
+            """Tie or clone module weights depending on whether we are using TorchScript or not"""
+            output_embeddings.weight = input_embeddings.weight
+            if getattr(output_embeddings, "bias", None) is not None:
+                output_embeddings.bias.data = torch.nn.functional.pad(
+                    output_embeddings.bias.data,
+                    (0, output_embeddings.weight.shape[0] - output_embeddings.bias.shape[0]),
+                    "constant",
+                    0,
+                )
+            if hasattr(output_embeddings, "out_features") and hasattr(input_embeddings, "num_embeddings"):
+                output_embeddings.out_features = input_embeddings.num_embeddings
+        
+        PreTrainedModel._tie_or_clone_weights = _tie_or_clone_weights
+        patched.append("_tie_or_clone_weights")
+    
+    # Patch 2: _supports_sdpa attribute check changed in newer transformers
+    if not hasattr(PreTrainedModel, '_supports_sdpa'):
+        PreTrainedModel._supports_sdpa = True
+        patched.append("_supports_sdpa")
+    
+    if patched:
+        log(f"Applied Florence2 compatibility patches: {', '.join(patched)}")
+
+# Apply patches at module load time
+patch_transformers_for_florence2()
 
 fl2_model_repos = {
     "base": "microsoft/Florence-2-base",
@@ -43,56 +176,252 @@ def fixed_get_imports(filename) -> list[str]:
         pass
     return imports
 
+def patch_florence2_model_file(model_path):
+    """
+    Patch modeling_florence2.py for newer transformers compatibility.
+    FORCE patch - adds _supports_sdpa = False to ALL classes
+    
+    NOTE: If transformers >= 5.x fixes Florence2 compatibility (see issue #39974),
+    consider updating transformers instead of using these patches.
+    These patches are minimal and only fix essential compatibility issues:
+    - _supports_sdpa attribute
+    - _tie_or_clone_weights method
+    - ModelOutput docstring validation
+    """
+    # Patch BOTH the model file AND the transformers cache
+    files_to_patch = [os.path.join(model_path, "modeling_florence2.py")]
+    
+    # Also patch cached versions in huggingface cache
+    import glob
+    hf_cache = os.path.expanduser("~/.cache/huggingface/modules/transformers_modules")
+    if os.path.exists(hf_cache):
+        files_to_patch.extend(glob.glob(f"{hf_cache}/**/modeling_florence2.py", recursive=True))
+    
+    patched_count = sum(1 for f in files_to_patch if _patch_single_file(f))
+    return patched_count > 0
+
+def _patch_single_file(modeling_file):
+    """Patch a single modeling_florence2.py file for transformers compatibility"""
+    if not os.path.exists(modeling_file):
+        return False
+    
+    with open(modeling_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    if '# PATCHED_FOR_NEW_TRANSFORMERS' in content:
+        return True  # Already patched
+    
+    # Force add _supports_sdpa to ALL Florence2 classes
+    lines = content.split('\n')
+    new_lines = ['# PATCHED_FOR_NEW_TRANSFORMERS']
+    
+    for i, line in enumerate(lines):
+        new_lines.append(line)
+        # Add _supports_sdpa = False to all Florence2 classes
+        if line.strip().startswith('class ') and 'Florence2' in line and line.strip().endswith(':'):
+            new_lines.append('    _supports_sdpa = False')
+            new_lines.append('    _supports_flash_attn_2 = False')
+    
+    content = '\n'.join(new_lines)
+    
+    # Replace _tie_or_clone_weights calls (removed in newer transformers)
+    if '_tie_or_clone_weights' in content:
+        import re
+        content = re.sub(
+            r'self\._tie_or_clone_weights\(([^,]+),\s*([^)]+)\)',
+            r'\1.weight = \2.weight',
+            content
+        )
+    
+    # Fix past_key_values[0][0].shape accesses to handle None values
+    old_pattern1 = r'past_key_values_length = past_key_values\[0\]\[0\]\.shape\[2\] if past_key_values is not None else 0'
+    new_pattern1 = 'past_key_values_length = past_key_values[0][0].shape[2] if (past_key_values is not None and past_key_values[0] is not None and past_key_values[0][0] is not None) else 0'
+    if re.search(old_pattern1, content):
+        content = re.sub(old_pattern1, new_pattern1, content)
+    
+    old_pattern2 = r'(\s+)past_length = past_key_values\[0\]\[0\]\.shape\[2\](\s*\n)'
+    def replace_past_length(match):
+        indent = match.group(1)
+        newline = match.group(2)
+        return f'{indent}past_length = past_key_values[0][0].shape[2] if (past_key_values is not None and past_key_values[0] is not None and past_key_values[0][0] is not None) else 0{newline}'
+    if re.search(old_pattern2, content):
+        content = re.sub(old_pattern2, replace_past_length, content)
+    
+    # Replace ModelOutput inheritance to avoid docstring validation errors
+    if re.search(r'class \w+Output\(ModelOutput\)', content):
+        
+        # Add our simple dataclass at the very beginning of the file
+        import_section = """# PATCHED: Simple output class to bypass ModelOutput docstring validation
+from dataclasses import dataclass
+from typing import Optional, Tuple, Any
+
+@dataclass 
+class Florence2SimpleOutput:
+    \"\"\"
+    Simple output class for Florence2 models.
+    
+    Args:
+        loss: Optional loss tensor.
+        logits: Model logits.
+        last_hidden_state: Last hidden state.
+        past_key_values: Past key values for caching.
+        decoder_hidden_states: Decoder hidden states.
+        decoder_attentions: Decoder attention weights.
+        cross_attentions: Cross attention weights.
+        encoder_last_hidden_state: Encoder last hidden state.
+        encoder_hidden_states: Encoder hidden states.
+        encoder_attentions: Encoder attention weights.
+        image_hidden_states: Image hidden states.
+    \"\"\"
+    loss: Any = None
+    logits: Any = None
+    last_hidden_state: Any = None
+    past_key_values: Any = None
+    decoder_hidden_states: Any = None
+    decoder_attentions: Any = None
+    cross_attentions: Any = None
+    encoder_last_hidden_state: Any = None
+    encoder_hidden_states: Any = None
+    encoder_attentions: Any = None
+    image_hidden_states: Any = None
+
+"""
+        # Add at the beginning, after the first line if it's a comment
+        if content.startswith('#'):
+            first_newline = content.find('\n')
+            content = content[:first_newline+1] + import_section + content[first_newline+1:]
+        else:
+            content = import_section + content
+        
+        # Replace ALL ModelOutput inheritance with Florence2SimpleOutput
+        content = re.sub(
+            r'class (\w+)\(ModelOutput\)',
+            r'class \1(Florence2SimpleOutput)',
+            content
+        )
+    
+    # Replace imports of problematic decorators with no-op versions
+    # Find where decorators are imported from transformers
+    decorator_imports = [
+        r'from transformers\.utils\.doc import (replace_return_docstrings|add_start_docstrings_to_model_forward|add_start_docstrings|add_end_docstrings)',
+        r'from transformers\.utils import (replace_return_docstrings|add_start_docstrings_to_model_forward|add_start_docstrings|add_end_docstrings)',
+    ]
+    
+    for pattern in decorator_imports:
+        if re.search(pattern, content):
+            # Replace the import with our no-op versions
+            noop_defs = '''
+# PATCHED: No-op decorators to bypass docstring validation
+def _noop_decorator(*args, **kwargs):
+    def decorator(fn):
+        return fn
+    if args and callable(args[0]):
+        return args[0]
+    return decorator
+
+replace_return_docstrings = _noop_decorator
+add_start_docstrings_to_model_forward = _noop_decorator  
+add_start_docstrings = _noop_decorator
+add_end_docstrings = _noop_decorator
+'''
+            content = re.sub(pattern, '# PATCHED: removed decorator import', content)
+            if 'class Florence2SimpleOutput' in content:
+                class_end = content.find('\nclass ', content.find('class Florence2SimpleOutput'))
+                if class_end > 0:
+                    content = content[:class_end] + '\n' + noop_defs + content[class_end:]
+                    break
+    
+    # Validate syntax before writing
+    try:
+        compile(content, modeling_file, 'exec')
+    except SyntaxError:
+        content = re.sub(r'\n\n\n+', '\n\n', content)
+        try:
+            compile(content, modeling_file, 'exec')
+        except SyntaxError:
+            return False
+    
+    with open(modeling_file, 'w', encoding='utf-8') as f:
+        f.write(content)
+    
+    return True
+
 def load_model(version):
     florence_path = os.path.join(folder_paths.models_dir, "florence2")
     os.makedirs(florence_path, exist_ok=True)
 
     model_path = os.path.join(florence_path, version)
-    attention = 'sdpa'
 
     if not os.path.exists(model_path):
         log(f"Downloading Florence2 {version} model...")
         repo_id = fl2_model_repos[version]
         from huggingface_hub import snapshot_download
         snapshot_download(repo_id=repo_id, local_dir=model_path, ignore_patterns=["*.md", "*.txt"])
+    
+    # Patch model files for newer transformers compatibility
+    patch_florence2_model_file(model_path)
 
+    # Clear cached Florence2 modules to ensure patched file is used
+    modules_to_remove = [key for key in list(sys.modules.keys()) if 'florence' in key.lower()]
+    for mod in modules_to_remove:
+        try:
+            del sys.modules[mod]
+        except:
+            pass
+    
+    # Also clear transformers module cache for this model
+    cache_key = f"transformers_modules.{os.path.basename(model_path)}"
+    modules_to_remove = [key for key in list(sys.modules.keys()) if cache_key in key]
+    for mod in modules_to_remove:
+        try:
+            del sys.modules[mod]
+        except:
+            pass
+    
+    # Re-patch cache files
+    import glob
+    hf_cache = os.path.expanduser("~/.cache/huggingface/modules/transformers_modules")
+    if os.path.exists(hf_cache):
+        for cached_file in glob.glob(f"{hf_cache}/**/modeling_florence2.py", recursive=True):
+            _patch_single_file(cached_file)
+    
+    # Patch _prepare_output_docstrings for runtime docstring validation bypass
+    try:
+        from transformers.utils import doc as doc_utils
+        if hasattr(doc_utils, '_prepare_output_docstrings'):
+            original_prepare = doc_utils._prepare_output_docstrings
+            def patched_prepare_output_docstrings(output_type, config_class, min_indent=0):
+                try:
+                    return original_prepare(output_type, config_class, min_indent)
+                except ValueError as e:
+                    if "Args" in str(e) or "Parameters" in str(e):
+                        return ""
+                    raise
+            doc_utils._prepare_output_docstrings = patched_prepare_output_docstrings
+    except:
+        pass
+    
+    # Load model
     try:
         with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
-            # model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
-            model = AutoModelForCausalLM.from_pretrained(model_path, attn_implementation=attention, device_map=device,
-                                                         torch_dtype=torch.float32, trust_remote_code=True)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                device_map=device,
+                torch_dtype=torch.float32,
+                trust_remote_code=True
+            )
+            
+            # Ensure _supports_sdpa is set on model class
+            if not hasattr(model.__class__, '_supports_sdpa'):
+                model.__class__._supports_sdpa = False
+                model.__class__._supports_flash_attn_2 = False
+            
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+            
     except Exception as e:
-        try:
-            model = AutoModelForCausalLM.from_pretrained(model_path, attn_implementation=attention, device_map=device,
-                                                         torch_dtype=torch.float32, trust_remote_code=True)
-            processor = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        except Exception as e:
-            sys.path.append(model_path)
-            # Import the Florence modules
-            if version == 'large-PromptGen-v1.5':
-                from florence2_large.modeling_florence2 import Florence2ForConditionalGeneration
-                from florence2_large.configuration_florence2 import Florence2Config
-            elif version == 'base-PromptGen-v1.5':
-                from florence2_base_ft.modeling_florence2 import Florence2ForConditionalGeneration
-                from florence2_base_ft.configuration_florence2 import Florence2Config
-            else:
-                log(f"Error loading model or tokenizer: {str(e)}", message_type='error')
-                return (None, None)
-
-            # Load the model configuration
-            model_config = Florence2Config.from_pretrained(model_path)
-            # Load the model
-            with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
-                model = Florence2ForConditionalGeneration.from_pretrained(
-                    model_path,
-                    config=model_config,
-                    attn_implementation=attention,
-                    device_map=device
-                ).to(device)
-
-            processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-
+        log(f"Error loading Florence2 model: {str(e)}", message_type='error')
+        return (None, None)
+    
     return (model.to(device), processor)
 
 def fig_to_pil(fig):
@@ -207,12 +536,11 @@ def draw_ocr_bboxes(image, prediction):
 
 
 def run_example(model, processor, task_prompt, image, max_new_tokens, num_beams, do_sample, text_input=None):
-    if text_input is None:
-        prompt = task_prompt
-    else:
-        prompt = task_prompt + text_input
+    prompt = task_prompt if text_input is None else task_prompt + text_input
     inputs = processor(text=prompt, images=image, return_tensors="pt").to(device)
-    generated_ids = model.generate(
+    
+    # use_cache=False to avoid past_key_values issues with newer transformers
+    generate_kwargs = dict(
         input_ids=inputs["input_ids"],
         pixel_values=inputs["pixel_values"],
         max_new_tokens=max_new_tokens,
@@ -221,6 +549,15 @@ def run_example(model, processor, task_prompt, image, max_new_tokens, num_beams,
         num_beams=num_beams,
         use_cache=False,
     )
+    
+    if hasattr(model, 'generate'):
+        generated_ids = model.generate(**generate_kwargs)
+    elif hasattr(model, 'model') and hasattr(model.model, 'generate'):
+        generated_ids = model.model.generate(**generate_kwargs)
+    elif hasattr(model, 'language_model') and hasattr(model.language_model, 'generate'):
+        generated_ids = model.language_model.generate(**generate_kwargs)
+    else:
+        raise AttributeError(f"Model {type(model)} has no generate method")
     generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
     parsed_answer = processor.post_process_generation(
         generated_text,
