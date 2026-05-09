@@ -15,8 +15,8 @@ from torch.hub import download_url_to_file
 from urllib.parse import urlparse
 import folder_paths
 import comfy.model_management
-from sam_hq.predictor import SamPredictorHQ
-from sam_hq.build_sam_hq import sam_model_registry
+from .sam_hq.predictor import SamPredictorHQ
+from .sam_hq.build_sam_hq import sam_model_registry
 
 import glob
 import folder_paths
