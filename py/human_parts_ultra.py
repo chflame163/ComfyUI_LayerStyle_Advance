@@ -73,7 +73,7 @@ class LS_HumanPartsUltra:
         """
         import onnxruntime as ort
 
-        model = ort.InferenceSession(model_path, providers=['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'])
+        model = ort.InferenceSession(model_path, providers=['CUDAExecutionProvider', 'CPUExecutionProvider', 'TensorrtExecutionProvider'])
         ret_images = []
         ret_masks = []
         for img in image:
