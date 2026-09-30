@@ -11,10 +11,21 @@ from comfy.utils import ProgressBar
 sys.path.append(os.path.join(os.path.dirname(__file__), 'BiRefNet_v2'))
 
 
+# Register BiRefNet as a model folder so paths from extra_model_paths.yaml
+# (e.g. ComfyUI Desktop's shared models folder) are searched, not just ComfyUI/models.
+folder_paths.add_model_folder_path("BiRefNet", os.path.join(folder_paths.models_dir, "BiRefNet"))
+
+
+def get_birefnet_dirs() -> list:
+    return folder_paths.get_folder_paths("BiRefNet")
+
+
 def get_models():
-    model_path = os.path.join(folder_paths.models_dir, 'BiRefNet', 'pth')
     model_ext = [".pth"]
-    model_dict = get_files(model_path, model_ext)
+    model_dict = {}
+    for birefnet_dir in get_birefnet_dirs():
+        for name, path in get_files(os.path.join(birefnet_dir, 'pth'), model_ext).items():
+            model_dict.setdefault(name, path)
     return model_dict
 
 class LS_LoadBiRefNetModel:
@@ -78,15 +89,17 @@ class LS_LoadBiRefNetModelV2:
     }
 
     def load_birefnet_model(self, version):
-        birefnet_path = os.path.join(folder_paths.models_dir, 'BiRefNet')
-        os.makedirs(birefnet_path, exist_ok=True)
+        birefnet_dirs = get_birefnet_dirs()
+        os.makedirs(birefnet_dirs[0], exist_ok=True)
 
-        model_path = os.path.join(birefnet_path, version)
+        # Use an existing download from any registered folder, else download into the first one.
+        model_path = next((os.path.join(d, version) for d in birefnet_dirs
+                           if os.path.exists(os.path.join(d, version))),
+                          os.path.join(birefnet_dirs[0], version))
 
         if version == "BiRefNet-General":
-            old_birefnet_path = os.path.join(birefnet_path, 'pth')
             old_model = "BiRefNet-general-epoch_244.pth"
-            old_model_path = os.path.join(old_birefnet_path, old_model)
+            old_model_path = get_models().get(old_model, "")
             if os.path.exists(old_model_path):
                 from .BiRefNet_v2.models.birefnet import BiRefNet
                 from .BiRefNet_v2.utils import check_state_dict
